@@ -16,7 +16,7 @@ set(ENV{PKG_CONFIG_PATH} "/usr/local/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 find_package(PkgConfig REQUIRED)
 
 find_package(SDL2 REQUIRED)
-#find_package(OpenGL REQUIRED)
+find_package(OpenGL REQUIRED)
 pkg_check_modules(RTMIDI REQUIRED rtmidi)
 pkg_check_modules(SFIZZ REQUIRED sfizz)
 

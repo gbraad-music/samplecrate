@@ -9,13 +9,19 @@ static void *cb_userdata = NULL;
 
 // Device-specific callback wrappers
 static void rtmidi_event_callback_0(double dt, const unsigned char *msg, size_t sz, void *userdata) {
-    if (midi_cb && sz >= 3)
-        midi_cb(msg[0], msg[1], msg[2], 0, cb_userdata);
+    if (midi_cb && sz >= 1) {
+        unsigned char data1 = (sz >= 2) ? msg[1] : 0;
+        unsigned char data2 = (sz >= 3) ? msg[2] : 0;
+        midi_cb(msg[0], data1, data2, 0, cb_userdata);
+    }
 }
 
 static void rtmidi_event_callback_1(double dt, const unsigned char *msg, size_t sz, void *userdata) {
-    if (midi_cb && sz >= 3)
-        midi_cb(msg[0], msg[1], msg[2], 1, cb_userdata);
+    if (midi_cb && sz >= 1) {
+        unsigned char data1 = (sz >= 2) ? msg[1] : 0;
+        unsigned char data2 = (sz >= 3) ? msg[2] : 0;
+        midi_cb(msg[0], data1, data2, 1, cb_userdata);
+    }
 }
 
 int midi_list_ports(void) {
