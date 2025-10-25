@@ -19,10 +19,10 @@ void samplecrate_mixer_init(SamplecrateMixer* mixer) {
         mixer->program_volumes[i] = 1.0f;  // 100% volume
         mixer->program_pans[i] = 0.5f;     // Center
         mixer->program_mutes[i] = 0;
-        mixer->program_fx_routes[i] = 0;   // No FX by default
+        mixer->program_fx_enable[i] = 0;   // FX disabled by default
     }
 
-    mixer->fx_route = FX_ROUTE_MASTER;  // Default to effects on master
+    mixer->master_fx_enable = 1;  // Master FX enabled by default
 }
 
 void samplecrate_config_init(SamplecrateConfig* config) {

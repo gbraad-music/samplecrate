@@ -6,6 +6,53 @@
 #include <math.h>
 #include <libgen.h>
 
+// Helper: initialize effects settings with defaults (matching samplecrate_common.c)
+static void init_effects_defaults(RSXEffectsSettings* fx) {
+    if (!fx) return;
+
+    // Distortion
+    fx->distortion_enabled = 0;
+    fx->distortion_drive = 0.5f;
+    fx->distortion_mix = 0.0f;
+
+    // Filter
+    fx->filter_enabled = 0;
+    fx->filter_cutoff = 1.0f;      // Fully open
+    fx->filter_resonance = 0.0f;
+
+    // EQ
+    fx->eq_enabled = 0;
+    fx->eq_low = 0.5f;             // Centered (no boost/cut)
+    fx->eq_mid = 0.5f;
+    fx->eq_high = 0.5f;
+
+    // Compressor
+    fx->compressor_enabled = 0;
+    fx->compressor_threshold = 0.8f;
+    fx->compressor_ratio = 0.2f;
+    fx->compressor_attack = 0.3f;
+    fx->compressor_release = 0.5f;
+    fx->compressor_makeup = 0.5f;
+
+    // Phaser
+    fx->phaser_enabled = 0;
+    fx->phaser_rate = 0.3f;
+    fx->phaser_depth = 0.5f;
+    fx->phaser_feedback = 0.3f;
+
+    // Reverb
+    fx->reverb_enabled = 0;
+    fx->reverb_room_size = 0.5f;
+    fx->reverb_damping = 0.5f;
+    fx->reverb_mix = 0.0f;
+
+    // Delay
+    fx->delay_enabled = 0;
+    fx->delay_time = 0.3f;
+    fx->delay_feedback = 0.3f;
+    fx->delay_mix = 0.0f;
+}
+
 SamplecrateRSX* samplecrate_rsx_create(void) {
     SamplecrateRSX* rsx = (SamplecrateRSX*)calloc(1, sizeof(SamplecrateRSX));
     if (!rsx) return NULL;
@@ -20,6 +67,18 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->program_pans[i] = 0.5f;     // Center pan
     }
     rsx->num_pads = 0;
+
+    // Initialize FX chain enables (default ON)
+    rsx->master_fx_enable = 1;
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        rsx->program_fx_enable[i] = 1;
+    }
+
+    // Initialize effects settings with defaults
+    init_effects_defaults(&rsx->master_effects);
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        init_effects_defaults(&rsx->program_effects[i]);
+    }
 
     // Initialize pads
     for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
@@ -87,6 +146,53 @@ static int parse_key_value(const char* line, char* key, char* value, size_t key_
     }
 
     return 0;
+}
+
+// Helper: load effects settings from key-value pairs
+static void load_effects_setting(RSXEffectsSettings* fx, const char* key, const char* value) {
+    if (!fx || !key || !value) return;
+
+    // Distortion
+    if (strcmp(key, "distortion_enabled") == 0) fx->distortion_enabled = atoi(value);
+    else if (strcmp(key, "distortion_drive") == 0) fx->distortion_drive = atof(value);
+    else if (strcmp(key, "distortion_mix") == 0) fx->distortion_mix = atof(value);
+
+    // Filter
+    else if (strcmp(key, "filter_enabled") == 0) fx->filter_enabled = atoi(value);
+    else if (strcmp(key, "filter_cutoff") == 0) fx->filter_cutoff = atof(value);
+    else if (strcmp(key, "filter_resonance") == 0) fx->filter_resonance = atof(value);
+
+    // EQ
+    else if (strcmp(key, "eq_enabled") == 0) fx->eq_enabled = atoi(value);
+    else if (strcmp(key, "eq_low") == 0) fx->eq_low = atof(value);
+    else if (strcmp(key, "eq_mid") == 0) fx->eq_mid = atof(value);
+    else if (strcmp(key, "eq_high") == 0) fx->eq_high = atof(value);
+
+    // Compressor
+    else if (strcmp(key, "compressor_enabled") == 0) fx->compressor_enabled = atoi(value);
+    else if (strcmp(key, "compressor_threshold") == 0) fx->compressor_threshold = atof(value);
+    else if (strcmp(key, "compressor_ratio") == 0) fx->compressor_ratio = atof(value);
+    else if (strcmp(key, "compressor_attack") == 0) fx->compressor_attack = atof(value);
+    else if (strcmp(key, "compressor_release") == 0) fx->compressor_release = atof(value);
+    else if (strcmp(key, "compressor_makeup") == 0) fx->compressor_makeup = atof(value);
+
+    // Phaser
+    else if (strcmp(key, "phaser_enabled") == 0) fx->phaser_enabled = atoi(value);
+    else if (strcmp(key, "phaser_rate") == 0) fx->phaser_rate = atof(value);
+    else if (strcmp(key, "phaser_depth") == 0) fx->phaser_depth = atof(value);
+    else if (strcmp(key, "phaser_feedback") == 0) fx->phaser_feedback = atof(value);
+
+    // Reverb
+    else if (strcmp(key, "reverb_enabled") == 0) fx->reverb_enabled = atoi(value);
+    else if (strcmp(key, "reverb_room_size") == 0) fx->reverb_room_size = atof(value);
+    else if (strcmp(key, "reverb_damping") == 0) fx->reverb_damping = atof(value);
+    else if (strcmp(key, "reverb_mix") == 0) fx->reverb_mix = atof(value);
+
+    // Delay
+    else if (strcmp(key, "delay_enabled") == 0) fx->delay_enabled = atoi(value);
+    else if (strcmp(key, "delay_time") == 0) fx->delay_time = atof(value);
+    else if (strcmp(key, "delay_feedback") == 0) fx->delay_feedback = atof(value);
+    else if (strcmp(key, "delay_mix") == 0) fx->delay_mix = atof(value);
 }
 
 int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
@@ -167,9 +273,32 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                         // prog_N_pan
                         rsx->program_pans[prog_idx] = atof(value);
                         printf("DEBUG: Stored program %d pan: %.3f\n", prog_num, rsx->program_pans[prog_idx]);
+                    } else if (strstr(key, "_fx_enable") != NULL) {
+                        // prog_N_fx_enable
+                        rsx->program_fx_enable[prog_idx] = atoi(value);
+                        printf("DEBUG: Stored program %d fx_enable: %d\n", prog_num, rsx->program_fx_enable[prog_idx]);
                     }
                 } else {
                     printf("DEBUG: prog_num %d out of range (1-%d)\n", prog_num, RSX_MAX_PROGRAMS);
+                }
+            }
+        }
+        // Handle [MasterEffects] section (case-insensitive)
+        else if (strcasecmp(section, "MasterEffects") == 0) {
+            if (strcmp(key, "fx_enable") == 0) {
+                rsx->master_fx_enable = atoi(value);
+            } else {
+                load_effects_setting(&rsx->master_effects, key, value);
+            }
+        }
+        // Handle [ProgramEffects1-4] sections (case-insensitive)
+        else if (strncasecmp(section, "ProgramEffects", 14) == 0) {
+            int prog_num = atoi(section + 14);  // Extract number from "ProgramEffects1" etc.
+            if (prog_num >= 1 && prog_num <= RSX_MAX_PROGRAMS) {
+                if (strcmp(key, "fx_enable") == 0) {
+                    rsx->program_fx_enable[prog_num - 1] = atoi(value);
+                } else {
+                    load_effects_setting(&rsx->program_effects[prog_num - 1], key, value);
                 }
             }
         }
@@ -218,6 +347,53 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
     return 0;
 }
 
+// Helper: save effects settings to file with prefix
+static void save_effects_settings(FILE* f, const char* prefix, const RSXEffectsSettings* fx) {
+    if (!f || !prefix || !fx) return;
+
+    // Distortion
+    fprintf(f, "%sdistortion_enabled=%d\n", prefix, fx->distortion_enabled);
+    fprintf(f, "%sdistortion_drive=%.3f\n", prefix, fx->distortion_drive);
+    fprintf(f, "%sdistortion_mix=%.3f\n", prefix, fx->distortion_mix);
+
+    // Filter
+    fprintf(f, "%sfilter_enabled=%d\n", prefix, fx->filter_enabled);
+    fprintf(f, "%sfilter_cutoff=%.3f\n", prefix, fx->filter_cutoff);
+    fprintf(f, "%sfilter_resonance=%.3f\n", prefix, fx->filter_resonance);
+
+    // EQ
+    fprintf(f, "%seq_enabled=%d\n", prefix, fx->eq_enabled);
+    fprintf(f, "%seq_low=%.3f\n", prefix, fx->eq_low);
+    fprintf(f, "%seq_mid=%.3f\n", prefix, fx->eq_mid);
+    fprintf(f, "%seq_high=%.3f\n", prefix, fx->eq_high);
+
+    // Compressor
+    fprintf(f, "%scompressor_enabled=%d\n", prefix, fx->compressor_enabled);
+    fprintf(f, "%scompressor_threshold=%.3f\n", prefix, fx->compressor_threshold);
+    fprintf(f, "%scompressor_ratio=%.3f\n", prefix, fx->compressor_ratio);
+    fprintf(f, "%scompressor_attack=%.3f\n", prefix, fx->compressor_attack);
+    fprintf(f, "%scompressor_release=%.3f\n", prefix, fx->compressor_release);
+    fprintf(f, "%scompressor_makeup=%.3f\n", prefix, fx->compressor_makeup);
+
+    // Phaser
+    fprintf(f, "%sphaser_enabled=%d\n", prefix, fx->phaser_enabled);
+    fprintf(f, "%sphaser_rate=%.3f\n", prefix, fx->phaser_rate);
+    fprintf(f, "%sphaser_depth=%.3f\n", prefix, fx->phaser_depth);
+    fprintf(f, "%sphaser_feedback=%.3f\n", prefix, fx->phaser_feedback);
+
+    // Reverb
+    fprintf(f, "%sreverb_enabled=%d\n", prefix, fx->reverb_enabled);
+    fprintf(f, "%sreverb_room_size=%.3f\n", prefix, fx->reverb_room_size);
+    fprintf(f, "%sreverb_damping=%.3f\n", prefix, fx->reverb_damping);
+    fprintf(f, "%sreverb_mix=%.3f\n", prefix, fx->reverb_mix);
+
+    // Delay
+    fprintf(f, "%sdelay_enabled=%d\n", prefix, fx->delay_enabled);
+    fprintf(f, "%sdelay_time=%.3f\n", prefix, fx->delay_time);
+    fprintf(f, "%sdelay_feedback=%.3f\n", prefix, fx->delay_feedback);
+    fprintf(f, "%sdelay_mix=%.3f\n", prefix, fx->delay_mix);
+}
+
 int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
     if (!rsx || !filepath) return -1;
 
@@ -247,7 +423,22 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             }
             fprintf(f, "prog_%d_volume=%.3f\n", i + 1, rsx->program_volumes[i]);
             fprintf(f, "prog_%d_pan=%.3f\n", i + 1, rsx->program_pans[i]);
+            fprintf(f, "prog_%d_fx_enable=%d\n", i + 1, rsx->program_fx_enable[i]);
         }
+        fprintf(f, "\n");
+    }
+
+    // Write master effects
+    fprintf(f, "[MasterEffects]\n");
+    fprintf(f, "fx_enable=%d\n", rsx->master_fx_enable);
+    save_effects_settings(f, "", &rsx->master_effects);
+    fprintf(f, "\n");
+
+    // Write per-program effects
+    for (int i = 0; i < rsx->num_programs; i++) {
+        fprintf(f, "[ProgramEffects%d]\n", i + 1);
+        fprintf(f, "fx_enable=%d\n", rsx->program_fx_enable[i]);
+        save_effects_settings(f, "", &rsx->program_effects[i]);
         fprintf(f, "\n");
     }
 

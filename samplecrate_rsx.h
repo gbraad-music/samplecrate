@@ -12,6 +12,51 @@ extern "C" {
 #define RSX_MAX_PATH 512
 #define RSX_MAX_DESCRIPTION 64
 
+// Effects settings for one effects chain
+typedef struct {
+    // Distortion
+    int distortion_enabled;
+    float distortion_drive;
+    float distortion_mix;
+
+    // Filter
+    int filter_enabled;
+    float filter_cutoff;
+    float filter_resonance;
+
+    // EQ
+    int eq_enabled;
+    float eq_low;
+    float eq_mid;
+    float eq_high;
+
+    // Compressor
+    int compressor_enabled;
+    float compressor_threshold;
+    float compressor_ratio;
+    float compressor_attack;
+    float compressor_release;
+    float compressor_makeup;
+
+    // Phaser
+    int phaser_enabled;
+    float phaser_rate;
+    float phaser_depth;
+    float phaser_feedback;
+
+    // Reverb
+    int reverb_enabled;
+    float reverb_room_size;
+    float reverb_damping;
+    float reverb_mix;
+
+    // Delay
+    int delay_enabled;
+    float delay_time;
+    float delay_feedback;
+    float delay_mix;
+} RSXEffectsSettings;
+
 // Note trigger pad configuration
 typedef struct {
     int note;                           // MIDI note number
@@ -35,6 +80,14 @@ typedef struct {
     // Per-program mixing defaults
     float program_volumes[RSX_MAX_PROGRAMS];  // Default volume for each program (0.0-1.0)
     float program_pans[RSX_MAX_PROGRAMS];     // Default pan for each program (0.0-1.0, 0.5=center)
+
+    // FX chain enable states
+    int master_fx_enable;                    // Master FX chain enable (0=off, 1=on)
+    int program_fx_enable[RSX_MAX_PROGRAMS]; // Per-program FX chain enables
+
+    // Effects settings
+    RSXEffectsSettings master_effects;                    // Master effects chain
+    RSXEffectsSettings program_effects[RSX_MAX_PROGRAMS]; // Per-program effects chains
 
     NoteTriggerPad pads[RSX_MAX_NOTE_PADS];
     int num_pads;

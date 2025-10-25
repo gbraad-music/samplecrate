@@ -32,7 +32,8 @@ int current_velocity = 0;
 // Mixer and effects
 SamplecrateMixer mixer;
 SamplecrateConfig config;
-RegrooveEffects* effects = nullptr;
+RegrooveEffects* effects_master = nullptr;     // Master FX chain
+RegrooveEffects* effects_program[4] = {nullptr, nullptr, nullptr, nullptr};  // Per-program FX chains
 
 // Input mappings and MIDI
 InputMappings* input_mappings = nullptr;
@@ -74,6 +75,146 @@ enum UIMode {
     UI_MODE_SETTINGS = 5
 };
 UIMode ui_mode = UI_MODE_PADS;  // Default to PADS view
+
+// FX mode (for EFFECTS panel)
+enum FXMode {
+    FX_MODE_MASTER = 0,   // FXM - Master effects
+    FX_MODE_PROGRAM = 1   // FXP - Per-program effects
+};
+FXMode fx_mode = FX_MODE_MASTER;  // Default to master FX view
+
+// Get current effects instance based on FX mode
+RegrooveEffects* get_current_effects() {
+    if (fx_mode == FX_MODE_MASTER) {
+        return effects_master;
+    } else {
+        // FX_MODE_PROGRAM - return current program's effects
+        if (current_program >= 0 && current_program < 4) {
+            return effects_program[current_program];
+        }
+        return nullptr;
+    }
+}
+
+// Helper: apply RSX effects settings to RegrooveEffects instance
+void apply_rsx_effects_to_instance(RegrooveEffects* fx, const RSXEffectsSettings* rsx_fx) {
+    if (!fx || !rsx_fx) return;
+
+    // Distortion
+    regroove_effects_set_distortion_enabled(fx, rsx_fx->distortion_enabled);
+    regroove_effects_set_distortion_drive(fx, rsx_fx->distortion_drive);
+    regroove_effects_set_distortion_mix(fx, rsx_fx->distortion_mix);
+
+    // Filter
+    regroove_effects_set_filter_enabled(fx, rsx_fx->filter_enabled);
+    regroove_effects_set_filter_cutoff(fx, rsx_fx->filter_cutoff);
+    regroove_effects_set_filter_resonance(fx, rsx_fx->filter_resonance);
+
+    // EQ
+    regroove_effects_set_eq_enabled(fx, rsx_fx->eq_enabled);
+    regroove_effects_set_eq_low(fx, rsx_fx->eq_low);
+    regroove_effects_set_eq_mid(fx, rsx_fx->eq_mid);
+    regroove_effects_set_eq_high(fx, rsx_fx->eq_high);
+
+    // Compressor
+    regroove_effects_set_compressor_enabled(fx, rsx_fx->compressor_enabled);
+    regroove_effects_set_compressor_threshold(fx, rsx_fx->compressor_threshold);
+    regroove_effects_set_compressor_ratio(fx, rsx_fx->compressor_ratio);
+    regroove_effects_set_compressor_attack(fx, rsx_fx->compressor_attack);
+    regroove_effects_set_compressor_release(fx, rsx_fx->compressor_release);
+    regroove_effects_set_compressor_makeup(fx, rsx_fx->compressor_makeup);
+
+    // Phaser
+    regroove_effects_set_phaser_enabled(fx, rsx_fx->phaser_enabled);
+    regroove_effects_set_phaser_rate(fx, rsx_fx->phaser_rate);
+    regroove_effects_set_phaser_depth(fx, rsx_fx->phaser_depth);
+    regroove_effects_set_phaser_feedback(fx, rsx_fx->phaser_feedback);
+
+    // Reverb
+    regroove_effects_set_reverb_enabled(fx, rsx_fx->reverb_enabled);
+    regroove_effects_set_reverb_room_size(fx, rsx_fx->reverb_room_size);
+    regroove_effects_set_reverb_damping(fx, rsx_fx->reverb_damping);
+    regroove_effects_set_reverb_mix(fx, rsx_fx->reverb_mix);
+
+    // Delay
+    regroove_effects_set_delay_enabled(fx, rsx_fx->delay_enabled);
+    regroove_effects_set_delay_time(fx, rsx_fx->delay_time);
+    regroove_effects_set_delay_feedback(fx, rsx_fx->delay_feedback);
+    regroove_effects_set_delay_mix(fx, rsx_fx->delay_mix);
+}
+
+// Helper: save current RegrooveEffects instance to RSX effects settings
+void save_instance_to_rsx_effects(RegrooveEffects* fx, RSXEffectsSettings* rsx_fx) {
+    if (!fx || !rsx_fx) return;
+
+    // Distortion
+    rsx_fx->distortion_enabled = regroove_effects_get_distortion_enabled(fx);
+    rsx_fx->distortion_drive = regroove_effects_get_distortion_drive(fx);
+    rsx_fx->distortion_mix = regroove_effects_get_distortion_mix(fx);
+
+    // Filter
+    rsx_fx->filter_enabled = regroove_effects_get_filter_enabled(fx);
+    rsx_fx->filter_cutoff = regroove_effects_get_filter_cutoff(fx);
+    rsx_fx->filter_resonance = regroove_effects_get_filter_resonance(fx);
+
+    // EQ
+    rsx_fx->eq_enabled = regroove_effects_get_eq_enabled(fx);
+    rsx_fx->eq_low = regroove_effects_get_eq_low(fx);
+    rsx_fx->eq_mid = regroove_effects_get_eq_mid(fx);
+    rsx_fx->eq_high = regroove_effects_get_eq_high(fx);
+
+    // Compressor
+    rsx_fx->compressor_enabled = regroove_effects_get_compressor_enabled(fx);
+    rsx_fx->compressor_threshold = regroove_effects_get_compressor_threshold(fx);
+    rsx_fx->compressor_ratio = regroove_effects_get_compressor_ratio(fx);
+    rsx_fx->compressor_attack = regroove_effects_get_compressor_attack(fx);
+    rsx_fx->compressor_release = regroove_effects_get_compressor_release(fx);
+    rsx_fx->compressor_makeup = regroove_effects_get_compressor_makeup(fx);
+
+    // Phaser
+    rsx_fx->phaser_enabled = regroove_effects_get_phaser_enabled(fx);
+    rsx_fx->phaser_rate = regroove_effects_get_phaser_rate(fx);
+    rsx_fx->phaser_depth = regroove_effects_get_phaser_depth(fx);
+    rsx_fx->phaser_feedback = regroove_effects_get_phaser_feedback(fx);
+
+    // Reverb
+    rsx_fx->reverb_enabled = regroove_effects_get_reverb_enabled(fx);
+    rsx_fx->reverb_room_size = regroove_effects_get_reverb_room_size(fx);
+    rsx_fx->reverb_damping = regroove_effects_get_reverb_damping(fx);
+    rsx_fx->reverb_mix = regroove_effects_get_reverb_mix(fx);
+
+    // Delay
+    rsx_fx->delay_enabled = regroove_effects_get_delay_enabled(fx);
+    rsx_fx->delay_time = regroove_effects_get_delay_time(fx);
+    rsx_fx->delay_feedback = regroove_effects_get_delay_feedback(fx);
+    rsx_fx->delay_mix = regroove_effects_get_delay_mix(fx);
+}
+
+// Helper: save current effects state to RSX file (auto-save)
+void autosave_effects_to_rsx() {
+    if (!rsx || rsx_file_path.empty()) return;
+
+    // Save FX chain enable states from mixer
+    rsx->master_fx_enable = mixer.master_fx_enable;
+    for (int i = 0; i < 4; i++) {
+        rsx->program_fx_enable[i] = mixer.program_fx_enable[i];
+    }
+
+    // Save master effects
+    if (effects_master) {
+        save_instance_to_rsx_effects(effects_master, &rsx->master_effects);
+    }
+
+    // Save per-program effects
+    for (int i = 0; i < 4; i++) {
+        if (effects_program[i]) {
+            save_instance_to_rsx_effects(effects_program[i], &rsx->program_effects[i]);
+        }
+    }
+
+    // Write to file
+    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+}
 
 // DrawLCD function from mock-ui.cpp
 static void DrawLCD(const char* text, float width, float height)
@@ -156,74 +297,108 @@ void handle_input_event(InputEvent* event) {
 
     switch (event->action) {
         // Effects parameters
-        case ACTION_FX_DISTORTION_DRIVE:
-            if (effects) regroove_effects_set_distortion_drive(effects, normalized_value);
+        case ACTION_FX_DISTORTION_DRIVE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_distortion_drive(fx, normalized_value);
             break;
-        case ACTION_FX_DISTORTION_MIX:
-            if (effects) regroove_effects_set_distortion_mix(effects, normalized_value);
+        }
+        case ACTION_FX_DISTORTION_MIX: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_distortion_mix(fx, normalized_value);
             break;
-        case ACTION_FX_FILTER_CUTOFF:
-            if (effects) regroove_effects_set_filter_cutoff(effects, normalized_value);
+        }
+        case ACTION_FX_FILTER_CUTOFF: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_filter_cutoff(fx, normalized_value);
             break;
-        case ACTION_FX_FILTER_RESONANCE:
-            if (effects) regroove_effects_set_filter_resonance(effects, normalized_value);
+        }
+        case ACTION_FX_FILTER_RESONANCE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_filter_resonance(fx, normalized_value);
             break;
-        case ACTION_FX_EQ_LOW:
-            if (effects) regroove_effects_set_eq_low(effects, normalized_value);
+        }
+        case ACTION_FX_EQ_LOW: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_eq_low(fx, normalized_value);
             break;
-        case ACTION_FX_EQ_MID:
-            if (effects) regroove_effects_set_eq_mid(effects, normalized_value);
+        }
+        case ACTION_FX_EQ_MID: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_eq_mid(fx, normalized_value);
             break;
-        case ACTION_FX_EQ_HIGH:
-            if (effects) regroove_effects_set_eq_high(effects, normalized_value);
+        }
+        case ACTION_FX_EQ_HIGH: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_eq_high(fx, normalized_value);
             break;
-        case ACTION_FX_COMPRESSOR_THRESHOLD:
-            if (effects) regroove_effects_set_compressor_threshold(effects, normalized_value);
+        }
+        case ACTION_FX_COMPRESSOR_THRESHOLD: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_compressor_threshold(fx, normalized_value);
             break;
-        case ACTION_FX_COMPRESSOR_RATIO:
-            if (effects) regroove_effects_set_compressor_ratio(effects, normalized_value);
+        }
+        case ACTION_FX_COMPRESSOR_RATIO: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_compressor_ratio(fx, normalized_value);
             break;
-        case ACTION_FX_DELAY_TIME:
-            if (effects) regroove_effects_set_delay_time(effects, normalized_value);
+        }
+        case ACTION_FX_DELAY_TIME: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_delay_time(fx, normalized_value);
             break;
-        case ACTION_FX_DELAY_FEEDBACK:
-            if (effects) regroove_effects_set_delay_feedback(effects, normalized_value);
+        }
+        case ACTION_FX_DELAY_FEEDBACK: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_delay_feedback(fx, normalized_value);
             break;
-        case ACTION_FX_DELAY_MIX:
-            if (effects) regroove_effects_set_delay_mix(effects, normalized_value);
+        }
+        case ACTION_FX_DELAY_MIX: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx) regroove_effects_set_delay_mix(fx, normalized_value);
             break;
+        }
 
         // Effects toggles
-        case ACTION_FX_DISTORTION_TOGGLE:
-            if (effects && event->value > 63) {
-                int current = regroove_effects_get_distortion_enabled(effects);
-                regroove_effects_set_distortion_enabled(effects, !current);
+        case ACTION_FX_DISTORTION_TOGGLE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx && event->value > 63) {
+                int current = regroove_effects_get_distortion_enabled(fx);
+                regroove_effects_set_distortion_enabled(fx, !current);
             }
             break;
-        case ACTION_FX_FILTER_TOGGLE:
-            if (effects && event->value > 63) {
-                int current = regroove_effects_get_filter_enabled(effects);
-                regroove_effects_set_filter_enabled(effects, !current);
+        }
+        case ACTION_FX_FILTER_TOGGLE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx && event->value > 63) {
+                int current = regroove_effects_get_filter_enabled(fx);
+                regroove_effects_set_filter_enabled(fx, !current);
             }
             break;
-        case ACTION_FX_EQ_TOGGLE:
-            if (effects && event->value > 63) {
-                int current = regroove_effects_get_eq_enabled(effects);
-                regroove_effects_set_eq_enabled(effects, !current);
+        }
+        case ACTION_FX_EQ_TOGGLE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx && event->value > 63) {
+                int current = regroove_effects_get_eq_enabled(fx);
+                regroove_effects_set_eq_enabled(fx, !current);
             }
             break;
-        case ACTION_FX_COMPRESSOR_TOGGLE:
-            if (effects && event->value > 63) {
-                int current = regroove_effects_get_compressor_enabled(effects);
-                regroove_effects_set_compressor_enabled(effects, !current);
+        }
+        case ACTION_FX_COMPRESSOR_TOGGLE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx && event->value > 63) {
+                int current = regroove_effects_get_compressor_enabled(fx);
+                regroove_effects_set_compressor_enabled(fx, !current);
             }
             break;
-        case ACTION_FX_DELAY_TOGGLE:
-            if (effects && event->value > 63) {
-                int current = regroove_effects_get_delay_enabled(effects);
-                regroove_effects_set_delay_enabled(effects, !current);
+        }
+        case ACTION_FX_DELAY_TOGGLE: {
+            RegrooveEffects* fx = get_current_effects();
+            if (fx && event->value > 63) {
+                int current = regroove_effects_get_delay_enabled(fx);
+                regroove_effects_set_delay_enabled(fx, !current);
             }
             break;
+        }
 
         // Mixer parameters
         case ACTION_MASTER_VOLUME:
@@ -547,13 +722,13 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
             sfizz_render_block(program_synths[i], prog_channels, 2, frames);
 
             // Apply per-program FX if enabled (pre-fader)
-            if (effects && mixer.program_fx_routes[i] == 1) {
+            if (effects_program[i] && mixer.program_fx_enable[i]) {
                 std::vector<int16_t> int16_buf(frames * 2);
                 for (int j = 0; j < frames; j++) {
                     int16_buf[j * 2] = static_cast<int16_t>(prog_left[j] * 32767.0f);
                     int16_buf[j * 2 + 1] = static_cast<int16_t>(prog_right[j] * 32767.0f);
                 }
-                regroove_effects_process(effects, int16_buf.data(), frames, 44100);
+                regroove_effects_process(effects_program[i], int16_buf.data(), frames, 44100);
                 for (int j = 0; j < frames; j++) {
                     prog_left[j] = int16_buf[j * 2] / 32767.0f;
                     prog_right[j] = int16_buf[j * 2 + 1] / 32767.0f;
@@ -595,24 +770,6 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         right[i] *= playback_right_gain;
     }
 
-    // Apply effects if routed to playback
-    if (effects && mixer.fx_route == FX_ROUTE_PLAYBACK) {
-        // Convert float to int16 for effects
-        std::vector<int16_t> int16_buf(frames * 2);
-        for (int i = 0; i < frames; i++) {
-            int16_buf[i * 2] = static_cast<int16_t>(left[i] * 32767.0f);
-            int16_buf[i * 2 + 1] = static_cast<int16_t>(right[i] * 32767.0f);
-        }
-
-        regroove_effects_process(effects, int16_buf.data(), frames, 44100);
-
-        // Convert back to float
-        for (int i = 0; i < frames; i++) {
-            left[i] = int16_buf[i * 2] / 32767.0f;
-            right[i] = int16_buf[i * 2 + 1] / 32767.0f;
-        }
-    }
-
     // Apply master volume and pan
     float master_vol = mixer.master_mute ? 0.0f : mixer.master_volume;
     float master_pan = mixer.master_pan;
@@ -624,8 +781,8 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         right[i] *= master_right_gain;
     }
 
-    // Apply effects if routed to master
-    if (effects && mixer.fx_route == FX_ROUTE_MASTER) {
+    // Apply master effects if enabled
+    if (effects_master && mixer.master_fx_enable) {
         // Convert float to int16 for effects
         std::vector<int16_t> int16_buf(frames * 2);
         for (int i = 0; i < frames; i++) {
@@ -633,7 +790,7 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
             int16_buf[i * 2 + 1] = static_cast<int16_t>(right[i] * 32767.0f);
         }
 
-        regroove_effects_process(effects, int16_buf.data(), frames, 44100);
+        regroove_effects_process(effects_master, int16_buf.data(), frames, 44100);
 
         // Convert back to float
         for (int i = 0; i < frames; i++) {
@@ -803,30 +960,58 @@ int main(int argc, char* argv[]) {
     mixer.playback_volume = config.default_playback_volume;
     mixer.playback_pan = config.default_playback_pan;
 
-    // Create effects and apply defaults from config
-    effects = regroove_effects_create();
-    if (effects) {
-        regroove_effects_set_distortion_drive(effects, config.fx_distortion_drive);
-        regroove_effects_set_distortion_mix(effects, config.fx_distortion_mix);
-        regroove_effects_set_filter_cutoff(effects, config.fx_filter_cutoff);
-        regroove_effects_set_filter_resonance(effects, config.fx_filter_resonance);
-        regroove_effects_set_eq_low(effects, config.fx_eq_low);
-        regroove_effects_set_eq_mid(effects, config.fx_eq_mid);
-        regroove_effects_set_eq_high(effects, config.fx_eq_high);
-        regroove_effects_set_compressor_threshold(effects, config.fx_compressor_threshold);
-        regroove_effects_set_compressor_ratio(effects, config.fx_compressor_ratio);
-        regroove_effects_set_compressor_attack(effects, config.fx_compressor_attack);
-        regroove_effects_set_compressor_release(effects, config.fx_compressor_release);
-        regroove_effects_set_compressor_makeup(effects, config.fx_compressor_makeup);
-        regroove_effects_set_phaser_rate(effects, config.fx_phaser_rate);
-        regroove_effects_set_phaser_depth(effects, config.fx_phaser_depth);
-        regroove_effects_set_phaser_feedback(effects, config.fx_phaser_feedback);
-        regroove_effects_set_reverb_room_size(effects, config.fx_reverb_room_size);
-        regroove_effects_set_reverb_damping(effects, config.fx_reverb_damping);
-        regroove_effects_set_reverb_mix(effects, config.fx_reverb_mix);
-        regroove_effects_set_delay_time(effects, config.fx_delay_time);
-        regroove_effects_set_delay_feedback(effects, config.fx_delay_feedback);
-        regroove_effects_set_delay_mix(effects, config.fx_delay_mix);
+    // Create master effects and apply defaults from config
+    effects_master = regroove_effects_create();
+    if (effects_master) {
+        regroove_effects_set_distortion_drive(effects_master, config.fx_distortion_drive);
+        regroove_effects_set_distortion_mix(effects_master, config.fx_distortion_mix);
+        regroove_effects_set_filter_cutoff(effects_master, config.fx_filter_cutoff);
+        regroove_effects_set_filter_resonance(effects_master, config.fx_filter_resonance);
+        regroove_effects_set_eq_low(effects_master, config.fx_eq_low);
+        regroove_effects_set_eq_mid(effects_master, config.fx_eq_mid);
+        regroove_effects_set_eq_high(effects_master, config.fx_eq_high);
+        regroove_effects_set_compressor_threshold(effects_master, config.fx_compressor_threshold);
+        regroove_effects_set_compressor_ratio(effects_master, config.fx_compressor_ratio);
+        regroove_effects_set_compressor_attack(effects_master, config.fx_compressor_attack);
+        regroove_effects_set_compressor_release(effects_master, config.fx_compressor_release);
+        regroove_effects_set_compressor_makeup(effects_master, config.fx_compressor_makeup);
+        regroove_effects_set_phaser_rate(effects_master, config.fx_phaser_rate);
+        regroove_effects_set_phaser_depth(effects_master, config.fx_phaser_depth);
+        regroove_effects_set_phaser_feedback(effects_master, config.fx_phaser_feedback);
+        regroove_effects_set_reverb_room_size(effects_master, config.fx_reverb_room_size);
+        regroove_effects_set_reverb_damping(effects_master, config.fx_reverb_damping);
+        regroove_effects_set_reverb_mix(effects_master, config.fx_reverb_mix);
+        regroove_effects_set_delay_time(effects_master, config.fx_delay_time);
+        regroove_effects_set_delay_feedback(effects_master, config.fx_delay_feedback);
+        regroove_effects_set_delay_mix(effects_master, config.fx_delay_mix);
+    }
+
+    // Create per-program effects (same defaults initially)
+    for (int i = 0; i < 4; i++) {
+        effects_program[i] = regroove_effects_create();
+        if (effects_program[i]) {
+            regroove_effects_set_distortion_drive(effects_program[i], config.fx_distortion_drive);
+            regroove_effects_set_distortion_mix(effects_program[i], config.fx_distortion_mix);
+            regroove_effects_set_filter_cutoff(effects_program[i], config.fx_filter_cutoff);
+            regroove_effects_set_filter_resonance(effects_program[i], config.fx_filter_resonance);
+            regroove_effects_set_eq_low(effects_program[i], config.fx_eq_low);
+            regroove_effects_set_eq_mid(effects_program[i], config.fx_eq_mid);
+            regroove_effects_set_eq_high(effects_program[i], config.fx_eq_high);
+            regroove_effects_set_compressor_threshold(effects_program[i], config.fx_compressor_threshold);
+            regroove_effects_set_compressor_ratio(effects_program[i], config.fx_compressor_ratio);
+            regroove_effects_set_compressor_attack(effects_program[i], config.fx_compressor_attack);
+            regroove_effects_set_compressor_release(effects_program[i], config.fx_compressor_release);
+            regroove_effects_set_compressor_makeup(effects_program[i], config.fx_compressor_makeup);
+            regroove_effects_set_phaser_rate(effects_program[i], config.fx_phaser_rate);
+            regroove_effects_set_phaser_depth(effects_program[i], config.fx_phaser_depth);
+            regroove_effects_set_phaser_feedback(effects_program[i], config.fx_phaser_feedback);
+            regroove_effects_set_reverb_room_size(effects_program[i], config.fx_reverb_room_size);
+            regroove_effects_set_reverb_damping(effects_program[i], config.fx_reverb_damping);
+            regroove_effects_set_reverb_mix(effects_program[i], config.fx_reverb_mix);
+            regroove_effects_set_delay_time(effects_program[i], config.fx_delay_time);
+            regroove_effects_set_delay_feedback(effects_program[i], config.fx_delay_feedback);
+            regroove_effects_set_delay_mix(effects_program[i], config.fx_delay_mix);
+        }
     }
 
     // Init sfizz - create main synth and program synths
@@ -882,6 +1067,25 @@ int main(int argc, char* argv[]) {
             mixer.program_pans[i] = rsx->program_pans[i];
             std::cout << "Applied program " << (i + 1) << " settings: volume=" << mixer.program_volumes[i]
                       << " pan=" << mixer.program_pans[i] << std::endl;
+        }
+
+        // Apply FX chain enable states from RSX
+        mixer.master_fx_enable = rsx->master_fx_enable;
+        for (int i = 0; i < rsx->num_programs; i++) {
+            mixer.program_fx_enable[i] = rsx->program_fx_enable[i];
+        }
+
+        // Apply effects settings from RSX
+        std::cout << "Loading effects settings from RSX..." << std::endl;
+        if (effects_master) {
+            apply_rsx_effects_to_instance(effects_master, &rsx->master_effects);
+            std::cout << "  Master effects loaded from RSX (enabled=" << mixer.master_fx_enable << ")" << std::endl;
+        }
+        for (int i = 0; i < rsx->num_programs; i++) {
+            if (effects_program[i]) {
+                apply_rsx_effects_to_instance(effects_program[i], &rsx->program_effects[i]);
+                std::cout << "  Program " << (i + 1) << " effects loaded from RSX (enabled=" << mixer.program_fx_enable[i] << ")" << std::endl;
+            }
         }
     } else {
         // No programs defined, load single SFZ file into main synth
@@ -1164,14 +1368,28 @@ int main(int argc, char* argv[]) {
 
             // Mode selection buttons
             const float BUTTON_SIZE = 48.0f;
-            ImVec4 fxCol = (ui_mode == UI_MODE_EFFECTS) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
-            if (ImGui::Button("FX", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+
+            // Switch to master effects settings
+            ImVec4 fxmCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_MASTER) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, fxmCol);
+            if (ImGui::Button("FXM", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_EFFECTS;
+                fx_mode = FX_MODE_MASTER;
             }
             ImGui::PopStyleColor();
             ImGui::SameLine();
 
+            // Switch to Program effects settings
+            ImVec4 fxpCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_PROGRAM) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, fxpCol);
+            if (ImGui::Button("FXP", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                ui_mode = UI_MODE_EFFECTS;
+                fx_mode = FX_MODE_PROGRAM;
+            }
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
+            // Switch to mixer panel
             ImVec4 mixCol = (ui_mode == UI_MODE_MIX) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, mixCol);
             if (ImGui::Button("MIX", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
@@ -1179,6 +1397,7 @@ int main(int argc, char* argv[]) {
             }
             ImGui::PopStyleColor();
 
+            // Sample crate (file) settings
             ImVec4 crateCol = (ui_mode == UI_MODE_INSTRUMENT) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, crateCol);
             if (ImGui::Button("CRATE", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
@@ -1187,6 +1406,7 @@ int main(int argc, char* argv[]) {
             ImGui::PopStyleColor();
             ImGui::SameLine();
 
+            // Note play buttons
             ImVec4 padsCol = (ui_mode == UI_MODE_PADS) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, padsCol);
             if (ImGui::Button("PADS", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
@@ -1561,19 +1781,12 @@ int main(int argc, char* argv[]) {
                     ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f), "MASTER");
                     ImGui::Dummy(ImVec2(0, 4.0f));
 
-                    // FX routing button (mutually exclusive with all other FX routes)
-                    ImVec4 fxCol = (mixer.fx_route == FX_ROUTE_MASTER) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                    // Master FX enable toggle
+                    ImVec4 fxCol = mixer.master_fx_enable ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
                     ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
                     if (ImGui::Button("FX##master_fx", ImVec2(sliderW, SOLO_SIZE))) {
-                        if (mixer.fx_route == FX_ROUTE_MASTER) {
-                            mixer.fx_route = FX_ROUTE_NONE;
-                        } else {
-                            mixer.fx_route = FX_ROUTE_MASTER;
-                            // Disable per-program FX
-                            for (int i = 0; i < 4; i++) {
-                                mixer.program_fx_routes[i] = 0;
-                            }
-                        }
+                        mixer.master_fx_enable = !mixer.master_fx_enable;
+                        autosave_effects_to_rsx();
                     }
                     ImGui::PopStyleColor();
                     ImGui::Dummy(ImVec2(0, 2.0f));
@@ -1625,23 +1838,14 @@ int main(int argc, char* argv[]) {
                         }
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
-                        // FX routing button (mutually exclusive with all other FX routes)
+                        // Per-program FX enable toggle
                         char fx_id[32];
                         snprintf(fx_id, sizeof(fx_id), "FX##prog%d_fx", i);
-                        ImVec4 fxCol = (mixer.program_fx_routes[i] == 1) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 fxCol = mixer.program_fx_enable[i] ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
                         ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
                         if (ImGui::Button(fx_id, ImVec2(sliderW, SOLO_SIZE))) {
-                            if (mixer.program_fx_routes[i] == 1) {
-                                mixer.program_fx_routes[i] = 0;
-                            } else {
-                                // Disable all other FX routes (mutex)
-                                mixer.fx_route = FX_ROUTE_NONE;
-                                for (int j = 0; j < 4; j++) {
-                                    mixer.program_fx_routes[j] = 0;
-                                }
-                                // Enable this program's FX
-                                mixer.program_fx_routes[i] = 1;
-                            }
+                            mixer.program_fx_enable[i] = !mixer.program_fx_enable[i];
+                            autosave_effects_to_rsx();
                         }
                         ImGui::PopStyleColor();
                         ImGui::Dummy(ImVec2(0, 2.0f));
@@ -1685,22 +1889,8 @@ int main(int argc, char* argv[]) {
                     ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "PLAYBACK");
                     ImGui::Dummy(ImVec2(0, 4.0f));
 
-                    // FX routing button (mutually exclusive with all other FX routes)
-                    ImVec4 fxCol = (mixer.fx_route == FX_ROUTE_PLAYBACK) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
-                    ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
-                    if (ImGui::Button("FX##playback_fx", ImVec2(sliderW, SOLO_SIZE))) {
-                        if (mixer.fx_route == FX_ROUTE_PLAYBACK) {
-                            mixer.fx_route = FX_ROUTE_NONE;
-                        } else {
-                            mixer.fx_route = FX_ROUTE_PLAYBACK;
-                            // Disable per-program FX
-                            for (int i = 0; i < 4; i++) {
-                                mixer.program_fx_routes[i] = 0;
-                            }
-                        }
-                    }
-                    ImGui::PopStyleColor();
-                    ImGui::Dummy(ImVec2(0, 2.0f));
+                    // No FX button for playback (use master FX instead)
+                    ImGui::Dummy(ImVec2(0, SOLO_SIZE + 2.0f));
 
                     // Pan slider
                     ImGui::PushItemWidth(sliderW);
@@ -1734,6 +1924,23 @@ int main(int argc, char* argv[]) {
             }
             else if (ui_mode == UI_MODE_EFFECTS) {
                 // EFFECTS MODE: Effect parameters (matching mock-ui.cpp layout)
+                RegrooveEffects* effects = get_current_effects();
+
+                // Show FX mode header
+                if (fx_mode == FX_MODE_MASTER) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f), "FXM - MASTER EFFECTS");
+                } else {
+                    if (rsx && rsx->program_names[current_program][0] != '\0') {
+                        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "FXP - PROGRAM %d: %s",
+                                          current_program + 1, rsx->program_names[current_program]);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "FXP - PROGRAM %d", current_program + 1);
+                    }
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 if (!effects) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Effects system not initialized");
                 } else {
@@ -1776,12 +1983,16 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_distortion_drive(effects, drive);
                                 config.fx_distortion_drive = drive;
+                                autosave_effects_to_rsx();
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##dist_drive_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_distortion_drive(effects, 0.5f);
                             config.fx_distortion_drive = 0.5f;
+                                autosave_effects_to_rsx();
+                            autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1806,12 +2017,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_distortion_mix(effects, mix);
                                 config.fx_distortion_mix = mix;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##dist_mix_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_distortion_mix(effects, 0.0f);
                             config.fx_distortion_mix = 0.0f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1853,12 +2066,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_filter_cutoff(effects, cutoff);
                                 config.fx_filter_cutoff = cutoff;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##filt_cutoff_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_filter_cutoff(effects, 1.0f);
                             config.fx_filter_cutoff = 1.0f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1883,12 +2098,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_filter_resonance(effects, reso);
                                 config.fx_filter_resonance = reso;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##filt_reso_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_filter_resonance(effects, 0.0f);
                             config.fx_filter_resonance = 0.0f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1930,12 +2147,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_eq_low(effects, eq_low);
                                 config.fx_eq_low = eq_low;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##eq_low_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_eq_low(effects, 0.5f);
                             config.fx_eq_low = 0.5f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1960,12 +2179,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_eq_mid(effects, eq_mid);
                                 config.fx_eq_mid = eq_mid;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##eq_mid_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_eq_mid(effects, 0.5f);
                             config.fx_eq_mid = 0.5f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -1990,12 +2211,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_eq_high(effects, eq_high);
                                 config.fx_eq_high = eq_high;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##eq_high_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_eq_high(effects, 0.5f);
                             config.fx_eq_high = 0.5f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2037,12 +2260,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_compressor_threshold(effects, thresh);
                                 config.fx_compressor_threshold = thresh;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##comp_thresh_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_compressor_threshold(effects, 0.8f);
                             config.fx_compressor_threshold = 0.8f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2067,12 +2292,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_compressor_ratio(effects, ratio);
                                 config.fx_compressor_ratio = ratio;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##comp_ratio_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_compressor_ratio(effects, 0.2f);
                             config.fx_compressor_ratio = 0.2f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2114,12 +2341,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_delay_time(effects, delay_time);
                                 config.fx_delay_time = delay_time;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##delay_time_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_delay_time(effects, 0.3f);
                             config.fx_delay_time = 0.3f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2144,12 +2373,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_delay_feedback(effects, feedback);
                                 config.fx_delay_feedback = feedback;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##delay_fb_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_delay_feedback(effects, 0.3f);
                             config.fx_delay_feedback = 0.3f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2174,12 +2405,14 @@ int main(int argc, char* argv[]) {
                             } else {
                                 regroove_effects_set_delay_mix(effects, delay_mix);
                                 config.fx_delay_mix = delay_mix;
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
                         if (ImGui::Button("R##delay_mix_reset", ImVec2(sliderW, MUTE_SIZE))) {
                             regroove_effects_set_delay_mix(effects, 0.0f);
                             config.fx_delay_mix = 0.0f;
+                                autosave_effects_to_rsx();
                         }
                         ImGui::EndGroup();
                         col_index++;
@@ -2664,8 +2897,13 @@ int main(int argc, char* argv[]) {
     if (lcd_display) {
         lcd_destroy(lcd_display);
     }
-    if (effects) {
-        regroove_effects_destroy(effects);
+    if (effects_master) {
+        regroove_effects_destroy(effects_master);
+    }
+    for (int i = 0; i < 4; i++) {
+        if (effects_program[i]) {
+            regroove_effects_destroy(effects_program[i]);
+        }
     }
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);

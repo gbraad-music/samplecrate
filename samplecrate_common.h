@@ -21,16 +21,11 @@ typedef struct {
     float program_volumes[4];  // Volume for each program (0-3)
     float program_pans[4];     // Pan for each program (0.0=left, 0.5=center, 1.0=right)
     int program_mutes[4];      // Mute for each program
-    int program_fx_routes[4];  // FX routing per program (0=none, 1=pre-fader)
+    int program_fx_enable[4];  // FX enable per program (0=disabled, 1=enabled)
 
-    // FX routing (mutually exclusive)
-    int fx_route;  // 0 = none, 1 = master, 2 = playback
+    // FX enable toggles (independent)
+    int master_fx_enable;      // 0 = disabled, 1 = enabled
 } SamplecrateMixer;
-
-// Effect routing options
-#define FX_ROUTE_NONE 0
-#define FX_ROUTE_MASTER 1
-#define FX_ROUTE_PLAYBACK 2
 
 // Configuration structure (saved to .ini file)
 typedef struct {
