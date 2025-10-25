@@ -1,0 +1,209 @@
+#include "samplecrate_common.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+void samplecrate_mixer_init(SamplecrateMixer* mixer) {
+    if (!mixer) return;
+
+    mixer->master_volume = 0.7f;
+    mixer->master_pan = 0.5f;
+    mixer->master_mute = 0;
+
+    mixer->playback_volume = 0.8f;
+    mixer->playback_pan = 0.5f;
+    mixer->playback_mute = 0;
+
+    // Initialize per-program volumes
+    for (int i = 0; i < 4; i++) {
+        mixer->program_volumes[i] = 1.0f;  // 100% volume
+        mixer->program_pans[i] = 0.5f;     // Center
+        mixer->program_mutes[i] = 0;
+        mixer->program_fx_routes[i] = 0;   // No FX by default
+    }
+
+    mixer->fx_route = FX_ROUTE_MASTER;  // Default to effects on master
+}
+
+void samplecrate_config_init(SamplecrateConfig* config) {
+    if (!config) return;
+
+    // Device defaults
+    config->midi_device_0 = -1;  // Not configured
+    config->midi_device_1 = -1;  // Not configured
+    config->audio_device = -1;   // Use default
+    config->expanded_pads = 0;   // Normal 16 pads by default
+
+    // Mixer defaults
+    config->default_master_volume = 0.7f;
+    config->default_master_pan = 0.5f;
+    config->default_playback_volume = 0.8f;
+    config->default_playback_pan = 0.5f;
+
+    // Effect defaults (neutral/off positions)
+    config->fx_distortion_drive = 0.5f;
+    config->fx_distortion_mix = 0.0f;
+    config->fx_filter_cutoff = 1.0f;      // Fully open
+    config->fx_filter_resonance = 0.0f;
+    config->fx_eq_low = 0.5f;             // Centered (no boost/cut)
+    config->fx_eq_mid = 0.5f;
+    config->fx_eq_high = 0.5f;
+    config->fx_compressor_threshold = 0.8f;
+    config->fx_compressor_ratio = 0.2f;
+    config->fx_compressor_attack = 0.3f;
+    config->fx_compressor_release = 0.5f;
+    config->fx_compressor_makeup = 0.5f;
+    config->fx_phaser_rate = 0.3f;
+    config->fx_phaser_depth = 0.5f;
+    config->fx_phaser_feedback = 0.3f;
+    config->fx_reverb_room_size = 0.5f;
+    config->fx_reverb_damping = 0.5f;
+    config->fx_reverb_mix = 0.0f;
+    config->fx_delay_time = 0.3f;
+    config->fx_delay_feedback = 0.3f;
+    config->fx_delay_mix = 0.0f;
+}
+
+int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
+    if (!config || !filepath) return 0;
+
+    FILE* f = fopen(filepath, "r");
+    if (!f) {
+        // File doesn't exist, use defaults
+        samplecrate_config_init(config);
+        return 0;
+    }
+
+    // Initialize with defaults first
+    samplecrate_config_init(config);
+
+    char line[512];
+    char section[64] = "";
+
+    while (fgets(line, sizeof(line), f)) {
+        // Remove newline
+        line[strcspn(line, "\r\n")] = 0;
+
+        // Skip empty lines and comments
+        if (line[0] == '\0' || line[0] == ';' || line[0] == '#') continue;
+
+        // Check for section header
+        if (line[0] == '[') {
+            char* end = strchr(line, ']');
+            if (end) {
+                *end = '\0';
+                strncpy(section, line + 1, sizeof(section) - 1);
+                section[sizeof(section) - 1] = '\0';
+            }
+            continue;
+        }
+
+        // Parse key=value
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+
+        *eq = '\0';
+        const char* key = line;
+        const char* value = eq + 1;
+
+        // Trim whitespace from key
+        while (*key == ' ' || *key == '\t') key++;
+        char* key_end = eq - 1;
+        while (key_end > key && (*key_end == ' ' || *key_end == '\t')) {
+            *key_end = '\0';
+            key_end--;
+        }
+
+        // Trim whitespace from value
+        while (*value == ' ' || *value == '\t') value++;
+
+        // Parse based on section
+        if (strcmp(section, "devices") == 0) {
+            if (strcmp(key, "midi_device_0") == 0) config->midi_device_0 = atoi(value);
+            else if (strcmp(key, "midi_device_1") == 0) config->midi_device_1 = atoi(value);
+            else if (strcmp(key, "audio_device") == 0) config->audio_device = atoi(value);
+            else if (strcmp(key, "expanded_pads") == 0) config->expanded_pads = atoi(value);
+        }
+        else if (strcmp(section, "Mixer") == 0) {
+            if (strcmp(key, "master_volume") == 0) config->default_master_volume = atof(value);
+            else if (strcmp(key, "master_pan") == 0) config->default_master_pan = atof(value);
+            else if (strcmp(key, "playback_volume") == 0) config->default_playback_volume = atof(value);
+            else if (strcmp(key, "playback_pan") == 0) config->default_playback_pan = atof(value);
+        }
+        else if (strcmp(section, "Effects") == 0) {
+            if (strcmp(key, "distortion_drive") == 0) config->fx_distortion_drive = atof(value);
+            else if (strcmp(key, "distortion_mix") == 0) config->fx_distortion_mix = atof(value);
+            else if (strcmp(key, "filter_cutoff") == 0) config->fx_filter_cutoff = atof(value);
+            else if (strcmp(key, "filter_resonance") == 0) config->fx_filter_resonance = atof(value);
+            else if (strcmp(key, "eq_low") == 0) config->fx_eq_low = atof(value);
+            else if (strcmp(key, "eq_mid") == 0) config->fx_eq_mid = atof(value);
+            else if (strcmp(key, "eq_high") == 0) config->fx_eq_high = atof(value);
+            else if (strcmp(key, "compressor_threshold") == 0) config->fx_compressor_threshold = atof(value);
+            else if (strcmp(key, "compressor_ratio") == 0) config->fx_compressor_ratio = atof(value);
+            else if (strcmp(key, "compressor_attack") == 0) config->fx_compressor_attack = atof(value);
+            else if (strcmp(key, "compressor_release") == 0) config->fx_compressor_release = atof(value);
+            else if (strcmp(key, "compressor_makeup") == 0) config->fx_compressor_makeup = atof(value);
+            else if (strcmp(key, "phaser_rate") == 0) config->fx_phaser_rate = atof(value);
+            else if (strcmp(key, "phaser_depth") == 0) config->fx_phaser_depth = atof(value);
+            else if (strcmp(key, "phaser_feedback") == 0) config->fx_phaser_feedback = atof(value);
+            else if (strcmp(key, "reverb_room_size") == 0) config->fx_reverb_room_size = atof(value);
+            else if (strcmp(key, "reverb_damping") == 0) config->fx_reverb_damping = atof(value);
+            else if (strcmp(key, "reverb_mix") == 0) config->fx_reverb_mix = atof(value);
+            else if (strcmp(key, "delay_time") == 0) config->fx_delay_time = atof(value);
+            else if (strcmp(key, "delay_feedback") == 0) config->fx_delay_feedback = atof(value);
+            else if (strcmp(key, "delay_mix") == 0) config->fx_delay_mix = atof(value);
+        }
+    }
+
+    fclose(f);
+    return 1;
+}
+
+int samplecrate_config_save(const SamplecrateConfig* config, const char* filepath) {
+    if (!config || !filepath) return 0;
+
+    FILE* f = fopen(filepath, "w");
+    if (!f) return 0;
+
+    fprintf(f, "; samplecrate configuration file\n\n");
+
+    fprintf(f, "[devices]\n");
+    fprintf(f, "midi_device_0=%d\n", config->midi_device_0);
+    fprintf(f, "midi_device_1=%d\n", config->midi_device_1);
+    fprintf(f, "audio_device=%d\n", config->audio_device);
+    fprintf(f, "expanded_pads=%d\n", config->expanded_pads);
+    fprintf(f, "\n");
+
+    fprintf(f, "[Mixer]\n");
+    fprintf(f, "master_volume=%.3f\n", config->default_master_volume);
+    fprintf(f, "master_pan=%.3f\n", config->default_master_pan);
+    fprintf(f, "playback_volume=%.3f\n", config->default_playback_volume);
+    fprintf(f, "playback_pan=%.3f\n", config->default_playback_pan);
+    fprintf(f, "\n");
+
+    fprintf(f, "[Effects]\n");
+    fprintf(f, "distortion_drive=%.3f\n", config->fx_distortion_drive);
+    fprintf(f, "distortion_mix=%.3f\n", config->fx_distortion_mix);
+    fprintf(f, "filter_cutoff=%.3f\n", config->fx_filter_cutoff);
+    fprintf(f, "filter_resonance=%.3f\n", config->fx_filter_resonance);
+    fprintf(f, "eq_low=%.3f\n", config->fx_eq_low);
+    fprintf(f, "eq_mid=%.3f\n", config->fx_eq_mid);
+    fprintf(f, "eq_high=%.3f\n", config->fx_eq_high);
+    fprintf(f, "compressor_threshold=%.3f\n", config->fx_compressor_threshold);
+    fprintf(f, "compressor_ratio=%.3f\n", config->fx_compressor_ratio);
+    fprintf(f, "compressor_attack=%.3f\n", config->fx_compressor_attack);
+    fprintf(f, "compressor_release=%.3f\n", config->fx_compressor_release);
+    fprintf(f, "compressor_makeup=%.3f\n", config->fx_compressor_makeup);
+    fprintf(f, "phaser_rate=%.3f\n", config->fx_phaser_rate);
+    fprintf(f, "phaser_depth=%.3f\n", config->fx_phaser_depth);
+    fprintf(f, "phaser_feedback=%.3f\n", config->fx_phaser_feedback);
+    fprintf(f, "reverb_room_size=%.3f\n", config->fx_reverb_room_size);
+    fprintf(f, "reverb_damping=%.3f\n", config->fx_reverb_damping);
+    fprintf(f, "reverb_mix=%.3f\n", config->fx_reverb_mix);
+    fprintf(f, "delay_time=%.3f\n", config->fx_delay_time);
+    fprintf(f, "delay_feedback=%.3f\n", config->fx_delay_feedback);
+    fprintf(f, "delay_mix=%.3f\n", config->fx_delay_mix);
+
+    fclose(f);
+    return 1;
+}

@@ -1,0 +1,9 @@
+// Simple SFZ file for music box C note
+
+<region>
+sample=./music-box-note-c_C_major.wav
+pitch_keycenter=60  // C4 (Middle C)
+lokey=0
+hikey=127
+lovel=0
+hivel=127
