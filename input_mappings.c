@@ -39,6 +39,8 @@ InputAction parse_action(const char *str) {
     if (strcmp(str, "trigger_note_pad") == 0) return ACTION_TRIGGER_NOTE_PAD;
     if (strcmp(str, "program_prev") == 0) return ACTION_PROGRAM_PREV;
     if (strcmp(str, "program_next") == 0) return ACTION_PROGRAM_NEXT;
+    if (strcmp(str, "note_suppress_toggle") == 0) return ACTION_NOTE_SUPPRESS_TOGGLE;
+    if (strcmp(str, "program_mute_toggle") == 0) return ACTION_PROGRAM_MUTE_TOGGLE;
     return ACTION_NONE;
 }
 
@@ -75,6 +77,8 @@ const char* input_action_name(InputAction action) {
         case ACTION_TRIGGER_NOTE_PAD: return "trigger_note_pad";
         case ACTION_PROGRAM_PREV: return "program_prev";
         case ACTION_PROGRAM_NEXT: return "program_next";
+        case ACTION_NOTE_SUPPRESS_TOGGLE: return "note_suppress_toggle";
+        case ACTION_PROGRAM_MUTE_TOGGLE: return "program_mute_toggle";
         default: return "none";
     }
 }

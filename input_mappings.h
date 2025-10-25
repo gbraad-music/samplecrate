@@ -40,6 +40,10 @@ typedef enum {
     // Program selection
     ACTION_PROGRAM_PREV,           // previous program (P-)
     ACTION_PROGRAM_NEXT,           // next program (P+)
+    // Note suppression (parameter = MIDI note number 0-127)
+    ACTION_NOTE_SUPPRESS_TOGGLE,   // toggle suppression for a specific note
+    // Program mute (parameter = program index 0-3)
+    ACTION_PROGRAM_MUTE_TOGGLE,    // toggle mute for a specific program
     ACTION_MAX
 } InputAction;
 

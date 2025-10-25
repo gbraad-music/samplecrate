@@ -51,6 +51,11 @@ std::string rsx_file_path = "";
 // Note pad visual feedback
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
 
+// Note suppression state (128 MIDI notes, 0-127)
+// [note][0] = global suppression (program -1)
+// [note][1-4] = per-program suppression for programs 0-3
+bool note_suppressed[128][5] = {false};
+
 // Current program selection (which SFZ is loaded)
 int current_program = 0;  // 0-3 for programs 1-4 (UI selection)
 int midi_target_program[2] = {0, 0};  // Per-device MIDI routing (set by program change messages)
@@ -188,6 +193,43 @@ void save_instance_to_rsx_effects(RegrooveEffects* fx, RSXEffectsSettings* rsx_f
     rsx_fx->delay_time = regroove_effects_get_delay_time(fx);
     rsx_fx->delay_feedback = regroove_effects_get_delay_feedback(fx);
     rsx_fx->delay_mix = regroove_effects_get_delay_mix(fx);
+}
+
+// Helper: load note suppression from RSX to runtime state
+void load_note_suppression_from_rsx() {
+    if (!rsx) return;
+
+    // Copy global suppression
+    for (int note = 0; note < 128; note++) {
+        note_suppressed[note][0] = (rsx->note_suppressed_global[note] != 0);
+    }
+
+    // Copy per-program suppression
+    for (int prog = 0; prog < 4; prog++) {
+        for (int note = 0; note < 128; note++) {
+            note_suppressed[note][prog + 1] = (rsx->note_suppressed_program[prog][note] != 0);
+        }
+    }
+}
+
+// Helper: save note suppression from runtime state to RSX file
+void save_note_suppression_to_rsx() {
+    if (!rsx || rsx_file_path.empty()) return;
+
+    // Copy global suppression
+    for (int note = 0; note < 128; note++) {
+        rsx->note_suppressed_global[note] = note_suppressed[note][0] ? 1 : 0;
+    }
+
+    // Copy per-program suppression
+    for (int prog = 0; prog < 4; prog++) {
+        for (int note = 0; note < 128; note++) {
+            rsx->note_suppressed_program[prog][note] = note_suppressed[note][prog + 1] ? 1 : 0;
+        }
+    }
+
+    // Save to file
+    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
 }
 
 // Helper: save current effects state to RSX file (auto-save)
@@ -479,6 +521,46 @@ void handle_input_event(InputEvent* event) {
             }
             break;
 
+        // Note suppression toggle
+        case ACTION_NOTE_SUPPRESS_TOGGLE: {
+            if (event->value > 63) {
+                // Extract note from event->parameter (lower byte)
+                // Extract program from event->parameter (upper byte) or use a second parameter system
+                // For now, we'll use parameter as note and assume global suppression
+                // TODO: Need to extend InputEvent to support second parameter for program
+                int note = event->parameter & 0x7F;  // Note 0-127
+                int program = (event->parameter >> 8) & 0xFF;  // Program in upper byte (-1 or 0-3)
+
+                if (note >= 0 && note < 128) {
+                    if (program == -1 || program == 255) {
+                        // Global suppression
+                        note_suppressed[note][0] = !note_suppressed[note][0];
+                        std::cout << "Note " << note << " global suppression: "
+                                  << (note_suppressed[note][0] ? "ON" : "OFF") << std::endl;
+                    } else if (program >= 0 && program < 4) {
+                        // Per-program suppression
+                        note_suppressed[note][program + 1] = !note_suppressed[note][program + 1];
+                        std::cout << "Note " << note << " suppression for program " << (program + 1) << ": "
+                                  << (note_suppressed[note][program + 1] ? "ON" : "OFF") << std::endl;
+                    }
+                }
+            }
+            break;
+        }
+
+        // Program mute toggle
+        case ACTION_PROGRAM_MUTE_TOGGLE: {
+            if (event->value > 63) {
+                int program = event->parameter;
+                if (program >= 0 && program < 4 && rsx) {
+                    mixer.program_mutes[program] = !mixer.program_mutes[program];
+                    std::cout << "Program " << (program + 1) << " mute: "
+                              << (mixer.program_mutes[program] ? "ON" : "OFF") << std::endl;
+                }
+            }
+            break;
+        }
+
         default:
             break;
     }
@@ -523,6 +605,15 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     if (msg_type == 0x90 && data2 > 0) {  // Note on
         // Determine which program to target based on device-specific settings
         int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
+
+        // Check if note is suppressed (global or for target program)
+        bool is_suppressed = note_suppressed[data1][0] ||  // Global suppression
+                            (target_prog >= 0 && target_prog < 4 && note_suppressed[data1][target_prog + 1]);  // Per-program
+
+        if (is_suppressed) {
+            std::cout << "Note " << (int)data1 << " suppressed for program " << (target_prog + 1) << std::endl;
+            return;  // Don't play suppressed notes
+        }
 
         // Try to map to RSX pad first via scene detection
         int pad_idx = map_note_to_pad(data1);
@@ -1087,6 +1178,10 @@ int main(int argc, char* argv[]) {
                 std::cout << "  Program " << (i + 1) << " effects loaded from RSX (enabled=" << mixer.program_fx_enable[i] << ")" << std::endl;
             }
         }
+
+        // Load note suppression settings from RSX
+        load_note_suppression_from_rsx();
+        std::cout << "Note suppression settings loaded from RSX" << std::endl;
     } else {
         // No programs defined, load single SFZ file into main synth
         std::cout << "Loading SFZ file into sfizz: " << sfz_file << std::endl;
@@ -1759,6 +1854,144 @@ int main(int argc, char* argv[]) {
                     if (!rsx_file_path.empty()) {
                         ImGui::SameLine();
                         ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.5f, 1.0f), "[Autosave]");
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Note Suppression section
+                    ImGui::Text("NOTE SUPPRESSION:");
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Prevent specific MIDI notes from playing");
+                    ImGui::Spacing();
+
+                    // Track if any changes were made for autosave
+                    bool suppression_changed = false;
+
+                    // Global suppression section
+                    ImGui::Text("Global Suppression (all programs):");
+                    ImGui::Spacing();
+
+                    // Display global suppression as a compact grid
+                    const int NOTES_PER_ROW = 12;  // One octave per row
+                    const int NUM_OCTAVES = 11;    // 128 notes = ~11 octaves (0-10 plus 8 notes)
+
+                    for (int octave = 0; octave < NUM_OCTAVES; octave++) {
+                        ImGui::Text("Oct %d:", octave);
+                        ImGui::SameLine(60);
+
+                        for (int note_in_octave = 0; note_in_octave < NOTES_PER_ROW; note_in_octave++) {
+                            int note = octave * NOTES_PER_ROW + note_in_octave;
+                            if (note >= 128) break;
+
+                            if (note_in_octave > 0) ImGui::SameLine();
+
+                            // Note names for reference
+                            static const char* note_names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+                            const char* note_name = note_names[note_in_octave];
+
+                            char btn_label[16];
+                            snprintf(btn_label, sizeof(btn_label), "%s##glob_%d", note_name, note);
+
+                            // Color: Red if suppressed, gray if not
+                            ImVec4 btn_col = note_suppressed[note][0] ?
+                                ImVec4(0.80f, 0.20f, 0.20f, 1.0f) :
+                                ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+
+                            ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
+                            if (ImGui::Button(btn_label, ImVec2(32, 24))) {
+                                note_suppressed[note][0] = !note_suppressed[note][0];
+                                suppression_changed = true;
+                            }
+                            ImGui::PopStyleColor();
+
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Note %d (%s%d): %s", note, note_name, octave,
+                                    note_suppressed[note][0] ? "SUPPRESSED" : "Enabled");
+                            }
+                        }
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Per-program suppression (only show if multiple programs)
+                    if (rsx->num_programs > 1) {
+                        ImGui::Text("Per-Program Suppression:");
+                        ImGui::Spacing();
+
+                        // Program selector for suppression view
+                        static int supp_program_view = 0;
+                        if (supp_program_view >= rsx->num_programs) supp_program_view = 0;
+
+                        ImGui::Text("View program:");
+                        ImGui::SameLine();
+                        for (int i = 0; i < rsx->num_programs; i++) {
+                            if (i > 0) ImGui::SameLine();
+
+                            char prog_btn[32];
+                            if (rsx->program_names[i][0] != '\0') {
+                                snprintf(prog_btn, sizeof(prog_btn), "%s##supp_prog_%d", rsx->program_names[i], i);
+                            } else {
+                                snprintf(prog_btn, sizeof(prog_btn), "Prog %d##supp_prog_%d", i + 1, i);
+                            }
+
+                            ImVec4 prog_col = (supp_program_view == i) ?
+                                ImVec4(0.70f, 0.60f, 0.20f, 1.0f) :
+                                ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+
+                            ImGui::PushStyleColor(ImGuiCol_Button, prog_col);
+                            if (ImGui::Button(prog_btn, ImVec2(80, 30))) {
+                                supp_program_view = i;
+                            }
+                            ImGui::PopStyleColor();
+                        }
+
+                        ImGui::Spacing();
+
+                        // Display per-program suppression grid
+                        for (int octave = 0; octave < NUM_OCTAVES; octave++) {
+                            ImGui::Text("Oct %d:", octave);
+                            ImGui::SameLine(60);
+
+                            for (int note_in_octave = 0; note_in_octave < NOTES_PER_ROW; note_in_octave++) {
+                                int note = octave * NOTES_PER_ROW + note_in_octave;
+                                if (note >= 128) break;
+
+                                if (note_in_octave > 0) ImGui::SameLine();
+
+                                static const char* note_names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+                                const char* note_name = note_names[note_in_octave];
+
+                                char btn_label[16];
+                                snprintf(btn_label, sizeof(btn_label), "%s##p%d_%d", note_name, supp_program_view, note);
+
+                                // Color: Red if suppressed, gray if not
+                                ImVec4 btn_col = note_suppressed[note][supp_program_view + 1] ?
+                                    ImVec4(0.80f, 0.20f, 0.20f, 1.0f) :
+                                    ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+
+                                ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
+                                if (ImGui::Button(btn_label, ImVec2(32, 24))) {
+                                    note_suppressed[note][supp_program_view + 1] = !note_suppressed[note][supp_program_view + 1];
+                                    suppression_changed = true;
+                                }
+                                ImGui::PopStyleColor();
+
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("Note %d (%s%d) for program %d: %s", note, note_name, octave,
+                                        supp_program_view + 1,
+                                        note_suppressed[note][supp_program_view + 1] ? "SUPPRESSED" : "Enabled");
+                                }
+                            }
+                        }
+                    }
+
+                    // Auto-save if suppression changed
+                    if (suppression_changed) {
+                        save_note_suppression_to_rsx();
                     }
                 }
             }

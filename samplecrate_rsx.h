@@ -91,6 +91,12 @@ typedef struct {
 
     NoteTriggerPad pads[RSX_MAX_NOTE_PADS];
     int num_pads;
+
+    // Note suppression (128 MIDI notes, 0-127)
+    // [note] = global suppression (affects all programs)
+    // [note] = per-program suppression for programs 0-3
+    unsigned char note_suppressed_global[128];      // 1=suppressed, 0=not suppressed
+    unsigned char note_suppressed_program[4][128];  // Per-program suppression
 } SamplecrateRSX;
 
 // Create a new RSX structure with defaults

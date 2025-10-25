@@ -92,6 +92,12 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->pads[i].program = -1;  // -1 = use current program
     }
 
+    // Initialize note suppression (all notes enabled by default)
+    memset(rsx->note_suppressed_global, 0, sizeof(rsx->note_suppressed_global));
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        memset(rsx->note_suppressed_program[i], 0, sizeof(rsx->note_suppressed_program[i]));
+    }
+
     return rsx;
 }
 
@@ -302,6 +308,30 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                 }
             }
         }
+        // Handle [NoteSuppression] section (case-insensitive)
+        else if (strcasecmp(section, "NoteSuppression") == 0) {
+            // Parse global_<note> or prog_<N>_<note> format
+            if (strncmp(key, "global_", 7) == 0) {
+                int note = atoi(key + 7);
+                if (note >= 0 && note < 128) {
+                    rsx->note_suppressed_global[note] = (unsigned char)atoi(value);
+                }
+            } else if (strncmp(key, "prog_", 5) == 0) {
+                // Extract program number from "prog_N_<note>"
+                int prog_num = atoi(key + 5);
+                if (prog_num >= 1 && prog_num <= RSX_MAX_PROGRAMS) {
+                    // Find the second underscore to get the note number
+                    const char* note_str = strchr(key + 5, '_');
+                    if (note_str) {
+                        note_str++;  // Skip underscore
+                        int note = atoi(note_str);
+                        if (note >= 0 && note < 128) {
+                            rsx->note_suppressed_program[prog_num - 1][note] = (unsigned char)atoi(value);
+                        }
+                    }
+                }
+            }
+        }
         // Handle [NoteTriggerPads] section (case-insensitive)
         else if (strcasecmp(section, "NoteTriggerPads") == 0) {
             // Parse pad_N<number>_<property> format
@@ -441,6 +471,34 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
         save_effects_settings(f, "", &rsx->program_effects[i]);
         fprintf(f, "\n");
     }
+
+    // Write note suppression
+    fprintf(f, "[NoteSuppression]\n");
+    fprintf(f, "# Global note suppression (affects all programs)\n");
+    for (int note = 0; note < 128; note++) {
+        if (rsx->note_suppressed_global[note]) {
+            fprintf(f, "global_%d=1\n", note);
+        }
+    }
+    fprintf(f, "\n# Per-program note suppression\n");
+    for (int prog = 0; prog < rsx->num_programs; prog++) {
+        int any_suppressed = 0;
+        for (int note = 0; note < 128; note++) {
+            if (rsx->note_suppressed_program[prog][note]) {
+                any_suppressed = 1;
+                break;
+            }
+        }
+        if (any_suppressed) {
+            fprintf(f, "# Program %d\n", prog + 1);
+            for (int note = 0; note < 128; note++) {
+                if (rsx->note_suppressed_program[prog][note]) {
+                    fprintf(f, "prog_%d_%d=1\n", prog + 1, note);
+                }
+            }
+        }
+    }
+    fprintf(f, "\n");
 
     // Write note trigger pads
     fprintf(f, "[NoteTriggerPads]\n");
