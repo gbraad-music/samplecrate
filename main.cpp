@@ -52,7 +52,7 @@ float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
 
 // Current program selection (which SFZ is loaded)
 int current_program = 0;  // 0-3 for programs 1-4 (UI selection)
-int midi_target_program = 0;  // 0-3 for MIDI routing (set by program change messages)
+int midi_target_program[2] = {0, 0};  // Per-device MIDI routing (set by program change messages)
 int current_scene = 0;    // 0-3 for scene detection (note range mapping)
 
 // Error message for LCD display
@@ -122,7 +122,15 @@ void switch_program(int program_index) {
     if (!program_synths[program_index]) return;  // Program not loaded
 
     current_program = program_index;
-    midi_target_program = program_index;  // UI selection also overrides MIDI routing
+
+    // Only update midi_target_program for devices that have program change DISABLED
+    // Devices with program change enabled should be controlled only by MIDI messages
+    if (!config.midi_program_change_enabled[0]) {
+        midi_target_program[0] = program_index;
+    }
+    if (!config.midi_program_change_enabled[1]) {
+        midi_target_program[1] = program_index;
+    }
 
     std::cout << "Switching to program " << (program_index + 1) << ": " << rsx->program_files[program_index] << std::endl;
 
@@ -247,7 +255,8 @@ void handle_input_event(InputEvent* event) {
                     int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
                     // Determine which synth to use based on pad's program setting
-                    int target_prog = config.midi_program_change_enabled ? midi_target_program : current_program;
+                    // For CC-triggered pads, use current_program as default (no device context)
+                    int target_prog = current_program;
                     sfizz_synth_t* target_synth = nullptr;
                     int actual_program = target_prog;
 
@@ -312,21 +321,21 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     // Handle program change
     if (msg_type == 0xC0) {  // Program Change
         int program_number = data1;  // 0-127
-        std::cout << "*** PROGRAM CHANGE RECEIVED: program=" << program_number << " ***" << std::endl;
+        std::cout << "*** PROGRAM CHANGE RECEIVED from device " << device_id << ": program=" << program_number << " ***" << std::endl;
 
-        // Check if program change is enabled in config
-        // When disabled: UI program selection leads for all MIDI messages
+        // Check if program change is enabled for this specific device
+        // When disabled: UI program selection leads for all MIDI messages from this device
         // When enabled: Routes MIDI to target program but doesn't change UI selection
-        if (!config.midi_program_change_enabled) {
-            std::cout << "    MIDI Program Change disabled - UI program selection leads" << std::endl;
+        if (!config.midi_program_change_enabled[device_id]) {
+            std::cout << "    MIDI Program Change disabled for device " << device_id << " - UI program selection leads" << std::endl;
             return;
         }
 
         if (rsx && rsx->num_programs > 0) {
             // Map MIDI program number to our programs (0-3)
             int target_program = program_number % rsx->num_programs;
-            midi_target_program = target_program;
-            std::cout << "    MIDI routed to program " << (target_program + 1)
+            midi_target_program[device_id] = target_program;
+            std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
                       << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
                       << " - UI remains at program " << (current_program + 1) << std::endl;
         } else {
@@ -337,8 +346,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
     // Handle note on/off
     if (msg_type == 0x90 && data2 > 0) {  // Note on
-        // Determine which program to target
-        int target_prog = config.midi_program_change_enabled ? midi_target_program : current_program;
+        // Determine which program to target based on device-specific settings
+        int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
 
         // Try to map to RSX pad first via scene detection
         int pad_idx = map_note_to_pad(data1);
@@ -412,12 +421,12 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             NoteTriggerPad* pad = &rsx->pads[pad_idx];
             if (pad->note >= 0 && pad->enabled) {
                 // Determine which synth to use based on pad's program setting
-                // If pad has no program set, use midi_target_program when enabled, else current_program
+                // If pad has no program set, use device-specific midi_target_program when enabled, else current_program
                 sfizz_synth_t* target_synth = nullptr;
                 if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
                     target_synth = program_synths[pad->program];
                 } else {
-                    int target_prog = config.midi_program_change_enabled ? midi_target_program : current_program;
+                    int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
                     target_synth = program_synths[target_prog];
                 }
 
@@ -429,9 +438,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         }
 
         // If not mapped to a pad, send note off to the appropriate synth
-        // Use midi_target_program if program change is enabled, otherwise use current UI selection
+        // Use device-specific midi_target_program if program change is enabled, otherwise use current UI selection
         std::lock_guard<std::mutex> lock(synth_mutex);
-        int target_prog = config.midi_program_change_enabled ? midi_target_program : current_program;
+        int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
         sfizz_synth_t* target_synth = program_synths[target_prog];
         if (target_synth) sfizz_send_note_off(target_synth, 0, data1, 0);
     } else if (msg_type == 0xB0) {  // CC message
@@ -862,7 +871,8 @@ int main(int argc, char* argv[]) {
         if (program_synths[0]) {
             synth = program_synths[0];
             current_program = 0;
-            midi_target_program = 0;  // Initialize MIDI routing to first program
+            midi_target_program[0] = 0;  // Initialize MIDI routing to first program
+            midi_target_program[1] = 0;
             error_message = "";  // Clear error if first program loaded successfully
         }
 
@@ -2330,7 +2340,8 @@ int main(int argc, char* argv[]) {
                                 int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
                                 // Determine which synth to use based on pad's program setting
-                                int target_prog = config.midi_program_change_enabled ? midi_target_program : current_program;
+                                // For UI-clicked pads, use current_program as default (no device context)
+                                int target_prog = current_program;
                                 sfizz_synth_t* target_synth = nullptr;
                                 int actual_program = target_prog;
 
@@ -2534,15 +2545,25 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // MIDI Program Change enable/disable
+                // MIDI Program Change enable/disable (per-device)
                 ImGui::Text("MIDI Program Change:");
-                bool pc_enabled = (config.midi_program_change_enabled != 0);
-                if (ImGui::Checkbox("Respond to MIDI Program Change messages", &pc_enabled)) {
-                    config.midi_program_change_enabled = pc_enabled ? 1 : 0;
+
+                // Device 0
+                bool pc_enabled_0 = (config.midi_program_change_enabled[0] != 0);
+                if (ImGui::Checkbox("Device 0: Respond to Program Change", &pc_enabled_0)) {
+                    config.midi_program_change_enabled[0] = pc_enabled_0 ? 1 : 0;
                     samplecrate_config_save(&config, "samplecrate.ini");
                 }
+
+                // Device 1
+                bool pc_enabled_1 = (config.midi_program_change_enabled[1] != 0);
+                if (ImGui::Checkbox("Device 1: Respond to Program Change", &pc_enabled_1)) {
+                    config.midi_program_change_enabled[1] = pc_enabled_1 ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                    "When disabled: UI program selection leads. When enabled: receives but doesn't change UI");
+                    "When disabled: UI selection leads. When enabled: routes per program change");
 
                 ImGui::Spacing();
                 ImGui::Spacing();

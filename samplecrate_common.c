@@ -34,7 +34,8 @@ void samplecrate_config_init(SamplecrateConfig* config) {
     config->audio_device = -1;   // Use default
     config->expanded_pads = 0;   // Normal 16 pads by default
     config->lock_ui_program_selection = 0;  // Allow UI control by default
-    config->midi_program_change_enabled = 1;  // Accept MIDI program changes by default
+    config->midi_program_change_enabled[0] = 1;  // Device 0: Accept MIDI program changes by default
+    config->midi_program_change_enabled[1] = 0;  // Device 1: Ignore program changes by default (use UI)
 
     // Mixer defaults
     config->default_master_volume = 0.7f;
@@ -126,7 +127,14 @@ int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
             else if (strcmp(key, "audio_device") == 0) config->audio_device = atoi(value);
             else if (strcmp(key, "expanded_pads") == 0) config->expanded_pads = atoi(value);
             else if (strcmp(key, "lock_ui_program_selection") == 0) config->lock_ui_program_selection = atoi(value);
-            else if (strcmp(key, "midi_program_change_enabled") == 0) config->midi_program_change_enabled = atoi(value);
+            else if (strcmp(key, "midi_program_change_enabled_device_0") == 0) config->midi_program_change_enabled[0] = atoi(value);
+            else if (strcmp(key, "midi_program_change_enabled_device_1") == 0) config->midi_program_change_enabled[1] = atoi(value);
+            // Legacy support for old config files
+            else if (strcmp(key, "midi_program_change_enabled") == 0) {
+                int val = atoi(value);
+                config->midi_program_change_enabled[0] = val;
+                config->midi_program_change_enabled[1] = val;
+            }
         }
         else if (strcmp(section, "Mixer") == 0) {
             if (strcmp(key, "master_volume") == 0) config->default_master_volume = atof(value);
@@ -176,7 +184,8 @@ int samplecrate_config_save(const SamplecrateConfig* config, const char* filepat
     fprintf(f, "midi_device_1=%d\n", config->midi_device_1);
     fprintf(f, "audio_device=%d\n", config->audio_device);
     fprintf(f, "expanded_pads=%d\n", config->expanded_pads);
-    fprintf(f, "midi_program_change_enabled=%d\n", config->midi_program_change_enabled);
+    fprintf(f, "midi_program_change_enabled_device_0=%d\n", config->midi_program_change_enabled[0]);
+    fprintf(f, "midi_program_change_enabled_device_1=%d\n", config->midi_program_change_enabled[1]);
     fprintf(f, "\n");
 
     fprintf(f, "[Mixer]\n");

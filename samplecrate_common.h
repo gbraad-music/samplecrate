@@ -40,7 +40,7 @@ typedef struct {
     int audio_device;    // Audio output device (-1 = default)
     int expanded_pads;   // 0 = 16 pads, 1 = 32 pads
     int lock_ui_program_selection;  // 0 = allow UI control, 1 = lock to MIDI only
-    int midi_program_change_enabled;  // 0 = ignore (UI selection leads), 1 = receive but don't change UI
+    int midi_program_change_enabled[2];  // Per-device: 0 = ignore (UI selection leads), 1 = receive but don't change UI
 
     // Mixer defaults
     float default_master_volume;
