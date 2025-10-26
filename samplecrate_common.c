@@ -31,6 +31,8 @@ void samplecrate_config_init(SamplecrateConfig* config) {
     // Device defaults
     config->midi_device_0 = -1;  // Not configured
     config->midi_device_1 = -1;  // Not configured
+    config->midi_channel[0] = -1;  // Device 0: Omni (all channels)
+    config->midi_channel[1] = -1;  // Device 1: Omni (all channels)
     config->audio_device = -1;   // Use default
     config->expanded_pads = 0;   // Normal 16 pads by default
     config->lock_ui_program_selection = 0;  // Allow UI control by default
@@ -124,6 +126,8 @@ int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
         if (strcmp(section, "devices") == 0) {
             if (strcmp(key, "midi_device_0") == 0) config->midi_device_0 = atoi(value);
             else if (strcmp(key, "midi_device_1") == 0) config->midi_device_1 = atoi(value);
+            else if (strcmp(key, "midi_channel_device_0") == 0) config->midi_channel[0] = atoi(value);
+            else if (strcmp(key, "midi_channel_device_1") == 0) config->midi_channel[1] = atoi(value);
             else if (strcmp(key, "audio_device") == 0) config->audio_device = atoi(value);
             else if (strcmp(key, "expanded_pads") == 0) config->expanded_pads = atoi(value);
             else if (strcmp(key, "lock_ui_program_selection") == 0) config->lock_ui_program_selection = atoi(value);
@@ -182,6 +186,8 @@ int samplecrate_config_save(const SamplecrateConfig* config, const char* filepat
     fprintf(f, "[devices]\n");
     fprintf(f, "midi_device_0=%d\n", config->midi_device_0);
     fprintf(f, "midi_device_1=%d\n", config->midi_device_1);
+    fprintf(f, "midi_channel_device_0=%d  ; -1 = Omni (all channels), 0-15 = MIDI channel 1-16\n", config->midi_channel[0]);
+    fprintf(f, "midi_channel_device_1=%d  ; -1 = Omni (all channels), 0-15 = MIDI channel 1-16\n", config->midi_channel[1]);
     fprintf(f, "audio_device=%d\n", config->audio_device);
     fprintf(f, "expanded_pads=%d\n", config->expanded_pads);
     fprintf(f, "midi_program_change_enabled_device_0=%d\n", config->midi_program_change_enabled[0]);

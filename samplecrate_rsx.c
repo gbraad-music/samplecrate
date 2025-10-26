@@ -65,6 +65,7 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->program_names[i][0] = '\0';
         rsx->program_volumes[i] = 1.0f;  // Default volume (100%)
         rsx->program_pans[i] = 0.5f;     // Center pan
+        rsx->program_midi_channels[i] = -1;  // Omni (all channels) by default
     }
     rsx->num_pads = 0;
 
@@ -283,6 +284,10 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                         // prog_N_fx_enable
                         rsx->program_fx_enable[prog_idx] = atoi(value);
                         printf("DEBUG: Stored program %d fx_enable: %d\n", prog_num, rsx->program_fx_enable[prog_idx]);
+                    } else if (strstr(key, "_midi_channel") != NULL) {
+                        // prog_N_midi_channel
+                        rsx->program_midi_channels[prog_idx] = atoi(value);
+                        printf("DEBUG: Stored program %d midi_channel: %d\n", prog_num, rsx->program_midi_channels[prog_idx]);
                     }
                 } else {
                     printf("DEBUG: prog_num %d out of range (1-%d)\n", prog_num, RSX_MAX_PROGRAMS);
@@ -454,6 +459,7 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             fprintf(f, "prog_%d_volume=%.3f\n", i + 1, rsx->program_volumes[i]);
             fprintf(f, "prog_%d_pan=%.3f\n", i + 1, rsx->program_pans[i]);
             fprintf(f, "prog_%d_fx_enable=%d\n", i + 1, rsx->program_fx_enable[i]);
+            fprintf(f, "prog_%d_midi_channel=%d  ; -1 = Omni, 0-15 = MIDI channel 1-16\n", i + 1, rsx->program_midi_channels[i]);
         }
         fprintf(f, "\n");
     }

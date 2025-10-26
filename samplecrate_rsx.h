@@ -81,6 +81,9 @@ typedef struct {
     float program_volumes[RSX_MAX_PROGRAMS];  // Default volume for each program (0.0-1.0)
     float program_pans[RSX_MAX_PROGRAMS];     // Default pan for each program (0.0-1.0, 0.5=center)
 
+    // Per-program MIDI channel filtering (-1 = Omni/all channels, 0-15 = specific channel)
+    int program_midi_channels[RSX_MAX_PROGRAMS];  // MIDI channel filter per program
+
     // FX chain enable states
     int master_fx_enable;                    // Master FX chain enable (0=off, 1=on)
     int program_fx_enable[RSX_MAX_PROGRAMS]; // Per-program FX chain enables

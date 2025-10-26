@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <mutex>
+#include <chrono>
 
 extern "C" {
 #include "lcd.h"
@@ -44,6 +45,10 @@ int learn_target_parameter = 0;
 // MIDI device configuration
 int midi_device_ports[MIDI_MAX_DEVICES] = {-1, -1};  // -1 = not configured
 
+// Audio device configuration
+SDL_AudioDeviceID current_audio_device_id = 0;  // Current audio device ID
+int num_audio_devices = 0;  // Number of available audio output devices
+
 // RSX file (note pads and SFZ wrapper)
 SamplecrateRSX* rsx = nullptr;
 std::string rsx_file_path = "";
@@ -60,6 +65,16 @@ bool note_suppressed[128][5] = {false};
 int current_program = 0;  // 0-3 for programs 1-4 (UI selection)
 int midi_target_program[2] = {0, 0};  // Per-device MIDI routing (set by program change messages)
 int current_scene = 0;    // 0-3 for scene detection (note range mapping)
+
+// MIDI clock tracking
+struct {
+    bool active = false;           // Receiving MIDI clock
+    bool running = false;          // Transport running (start/continue)
+    float bpm = 0.0f;             // Calculated BPM
+    uint64_t last_clock_time = 0; // Last clock pulse timestamp (microseconds)
+    int pulse_count = 0;          // Pulses since last calculation
+    uint64_t last_bpm_calc_time = 0; // Last BPM calculation time
+} midi_clock;
 
 // Error message for LCD display
 std::string error_message = "";
@@ -566,14 +581,80 @@ void handle_input_event(InputEvent* event) {
     }
 }
 
+// Helper: get current time in microseconds
+static uint64_t get_microseconds() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
 // MIDI event callback from midi.c
 void midi_event_callback(unsigned char status, unsigned char data1, unsigned char data2, int device_id, void* userdata) {
     int msg_type = status & 0xF0;
     int channel = status & 0x0F;
 
+    // Handle MIDI Clock messages (Real-Time messages - these don't have channels)
+    if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
+        uint64_t now = get_microseconds();
+
+        if (midi_clock.last_clock_time > 0) {
+            uint64_t interval = now - midi_clock.last_clock_time;
+
+            // Calculate BPM every 24 pulses (one quarter note)
+            midi_clock.pulse_count++;
+            if (midi_clock.pulse_count >= 24) {
+                uint64_t total_time = now - midi_clock.last_bpm_calc_time;
+                // BPM = (60,000,000 microseconds/minute) / (time for one quarter note in microseconds)
+                if (total_time > 0) {
+                    midi_clock.bpm = 60000000.0f / total_time;
+                }
+                midi_clock.pulse_count = 0;
+                midi_clock.last_bpm_calc_time = now;
+            }
+        } else {
+            midi_clock.last_bpm_calc_time = now;
+        }
+
+        midi_clock.last_clock_time = now;
+        midi_clock.active = true;
+        return;
+    } else if (status == 0xFA) {  // MIDI Start
+        midi_clock.running = true;
+        midi_clock.pulse_count = 0;
+        midi_clock.last_bpm_calc_time = get_microseconds();
+        std::cout << "MIDI Start received" << std::endl;
+        return;
+    } else if (status == 0xFC) {  // MIDI Stop
+        midi_clock.running = false;
+        std::cout << "MIDI Stop received" << std::endl;
+        return;
+    } else if (status == 0xFB) {  // MIDI Continue
+        midi_clock.running = true;
+        std::cout << "MIDI Continue received" << std::endl;
+        return;
+    }
+
     // Debug: print all incoming MIDI messages
     std::cout << "MIDI device " << device_id << ": status=0x" << std::hex << (int)status
-              << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2 << std::endl;
+              << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
+              << " channel=" << (channel + 1) << std::endl;
+
+    // Channel filtering (for channel voice messages, not system messages)
+    // System messages (0xF0-0xFF) don't have channels, so we don't filter them
+    if (msg_type != 0xF0) {  // Not a system message
+        if (device_id >= 0 && device_id < 2) {
+            int channel_filter = config.midi_channel[device_id];
+            // If channel filter is set (not -1/Omni), check if message channel matches
+            if (channel_filter >= 0 && channel_filter <= 15) {
+                if (channel != channel_filter) {
+                    // Message is on a different channel, ignore it
+                    std::cout << "  Filtered out (channel " << (channel + 1)
+                              << " != filter channel " << (channel_filter + 1) << ")" << std::endl;
+                    return;
+                }
+            }
+        }
+    }
 
     // Handle program change
     if (msg_type == 0xC0) {  // Program Change
@@ -605,6 +686,19 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     if (msg_type == 0x90 && data2 > 0) {  // Note on
         // Determine which program to target based on device-specific settings
         int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
+
+        // Check per-program MIDI channel filter
+        if (rsx && target_prog >= 0 && target_prog < rsx->num_programs) {
+            int prog_channel_filter = rsx->program_midi_channels[target_prog];
+            if (prog_channel_filter >= 0 && prog_channel_filter <= 15) {
+                if (channel != prog_channel_filter) {
+                    std::cout << "  Program " << (target_prog + 1) << " channel filter: Note on channel "
+                              << (channel + 1) << " != program channel " << (prog_channel_filter + 1)
+                              << " (ignored)" << std::endl;
+                    return;  // Channel doesn't match program filter
+                }
+            }
+        }
 
         // Check if note is suppressed (global or for target program)
         bool is_suppressed = note_suppressed[data1][0] ||  // Global suppression
@@ -681,6 +775,20 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             }
         }
     } else if (msg_type == 0x80 || (msg_type == 0x90 && data2 == 0)) {  // Note off
+        // Determine which program to target (same logic as note on)
+        int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
+
+        // Check per-program MIDI channel filter
+        if (rsx && target_prog >= 0 && target_prog < rsx->num_programs) {
+            int prog_channel_filter = rsx->program_midi_channels[target_prog];
+            if (prog_channel_filter >= 0 && prog_channel_filter <= 15) {
+                if (channel != prog_channel_filter) {
+                    // Silently ignore - don't log note offs as much
+                    return;  // Channel doesn't match program filter
+                }
+            }
+        }
+
         // Try to map to RSX pad first
         int pad_idx = map_note_to_pad(data1);
         if (pad_idx >= 0 && rsx && pad_idx < RSX_MAX_NOTE_PADS) {
@@ -692,7 +800,6 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
                     target_synth = program_synths[pad->program];
                 } else {
-                    int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
                     target_synth = program_synths[target_prog];
                 }
 
@@ -706,7 +813,6 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         // If not mapped to a pad, send note off to the appropriate synth
         // Use device-specific midi_target_program if program change is enabled, otherwise use current UI selection
         std::lock_guard<std::mutex> lock(synth_mutex);
-        int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
         sfizz_synth_t* target_synth = program_synths[target_prog];
         if (target_synth) sfizz_send_note_off(target_synth, 0, data1, 0);
     } else if (msg_type == 0xB0) {  // CC message
@@ -1204,6 +1310,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Enumerate audio output devices
+    num_audio_devices = SDL_GetNumAudioDevices(0);  // 0 = output devices
+    std::cout << "Found " << num_audio_devices << " audio output device(s)" << std::endl;
+    for (int i = 0; i < num_audio_devices && i < 16; i++) {
+        const char* device_name = SDL_GetAudioDeviceName(i, 0);
+        std::cout << "  Device " << i << ": " << (device_name ? device_name : "Unknown") << std::endl;
+    }
+
     // Init SDL audio
     SDL_AudioSpec spec, obtained;
     spec.freq = 44100;
@@ -1211,16 +1325,28 @@ int main(int argc, char* argv[]) {
     spec.channels = 2;
     spec.samples = 512;
     spec.callback = audioCallback;
+    spec.userdata = nullptr;
 
-    if (SDL_OpenAudio(&spec, &obtained) < 0) {
-        std::cerr << "Failed to open audio: " << SDL_GetError() << std::endl;
+    // Determine which audio device to use
+    const char* device_to_open = nullptr;
+    if (config.audio_device >= 0 && config.audio_device < num_audio_devices) {
+        device_to_open = SDL_GetAudioDeviceName(config.audio_device, 0);
+        std::cout << "Using configured audio device " << config.audio_device << ": " << device_to_open << std::endl;
+    } else {
+        std::cout << "Using default audio device" << std::endl;
+    }
+
+    // Open audio device (SDL_OpenAudioDevice with NULL uses default)
+    current_audio_device_id = SDL_OpenAudioDevice(device_to_open, 0, &spec, &obtained, 0);
+    if (current_audio_device_id == 0) {
+        std::cerr << "Failed to open audio device: " << SDL_GetError() << std::endl;
     } else {
         std::cout << "Audio opened successfully" << std::endl;
         std::cout << "Sample rate: " << obtained.freq << " Hz" << std::endl;
         std::cout << "Channels: " << (int)obtained.channels << std::endl;
         std::cout << "Buffer size: " << obtained.samples << " samples" << std::endl;
+        SDL_PauseAudioDevice(current_audio_device_id, 0);  // Start audio
     }
-    SDL_PauseAudio(0);
 
     // Initialize input mappings and load from config
     input_mappings = input_mappings_create();
@@ -1310,6 +1436,15 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Update MIDI clock timeout (if no clock received for 1 second, mark as inactive)
+        if (midi_clock.active) {
+            uint64_t now = get_microseconds();
+            if (now - midi_clock.last_clock_time > 1000000) {  // 1 second timeout
+                midi_clock.active = false;
+                midi_clock.running = false;
+            }
+        }
+
         // Main window
         ImGuiIO& io = ImGui::GetIO();
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -1360,40 +1495,54 @@ int main(int argc, char* argv[]) {
                         ? rsx->program_names[current_program]
                         : "";
 
+                    // Build MIDI clock info string
+                    char clock_info[64] = "";
+                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
+                        const char* transport_icon = midi_clock.running ? ">" : "||";
+                        snprintf(clock_info, sizeof(clock_info), " %s%.1f", transport_icon, midi_clock.bpm);
+                    }
+
                     if (current_note >= 0) {
                         if (prog_display[0] != '\0') {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s\nNote: %d Vel: %d",
+                                     "Prg %d/%d: %s%s\nNote: %d Vel: %d",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, current_note, current_velocity);
+                                     prog_display, clock_info, current_note, current_velocity);
                         } else {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d\nNote: %d Vel: %d",
+                                     "Prg %d/%d%s\nNote: %d Vel: %d",
                                      current_program + 1, rsx->num_programs,
-                                     current_note, current_velocity);
+                                     clock_info, current_note, current_velocity);
                         }
                     } else {
                         if (prog_display[0] != '\0') {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s\n[Ready]",
+                                     "Prg %d/%d: %s%s\n[Ready]",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display);
+                                     prog_display, clock_info);
                         } else {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d\n[Ready]",
-                                     current_program + 1, rsx->num_programs);
+                                     "Prg %d/%d%s\n[Ready]",
+                                     current_program + 1, rsx->num_programs,
+                                     clock_info);
                         }
                     }
                 } else {
                     // No programs, show simple display
+                    char clock_info[64] = "";
+                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
+                        const char* transport_icon = midi_clock.running ? ">" : "||";
+                        snprintf(clock_info, sizeof(clock_info), "\n%s %.1f BPM", transport_icon, midi_clock.bpm);
+                    }
+
                     if (current_note >= 0) {
                         snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s\n\nNote: %d\nVelocity: %d",
-                                 sfz_filename.c_str(), current_note, current_velocity);
+                                 "File: %s%s\nNote: %d Vel: %d",
+                                 sfz_filename.c_str(), clock_info, current_note, current_velocity);
                     } else {
                         snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s\n\n[Ready]",
-                                 sfz_filename.c_str());
+                                 "File: %s%s\n[Ready]",
+                                 sfz_filename.c_str(), clock_info);
                     }
                 }
                 lcd_write(lcd_display, lcd_text);
@@ -1660,6 +1809,45 @@ int main(int argc, char* argv[]) {
                         }
                         ImGui::PopItemWidth();
 
+                        // MIDI Channel filter with label
+                        ImGui::Text("MIDI Ch:");
+                        ImGui::SameLine(80);
+                        char midi_ch_label[32];
+                        snprintf(midi_ch_label, sizeof(midi_ch_label), "##prog%d_midich", i);
+                        ImGui::PushItemWidth(150);
+
+                        // Build preview label
+                        char midi_ch_preview[32];
+                        if (rsx->program_midi_channels[i] == -1) {
+                            snprintf(midi_ch_preview, sizeof(midi_ch_preview), "Omni (All)");
+                        } else {
+                            snprintf(midi_ch_preview, sizeof(midi_ch_preview), "Channel %d", rsx->program_midi_channels[i] + 1);
+                        }
+
+                        if (ImGui::BeginCombo(midi_ch_label, midi_ch_preview)) {
+                            // Omni option
+                            if (ImGui::Selectable("Omni (All Channels)", rsx->program_midi_channels[i] == -1)) {
+                                rsx->program_midi_channels[i] = -1;
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
+
+                            // Channel 1-16
+                            for (int ch = 0; ch < 16; ch++) {
+                                char ch_label[16];
+                                snprintf(ch_label, sizeof(ch_label), "Channel %d", ch + 1);
+                                if (ImGui::Selectable(ch_label, rsx->program_midi_channels[i] == ch)) {
+                                    rsx->program_midi_channels[i] = ch;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        ImGui::PopItemWidth();
+
                         // Remove button
                         if (ImGui::Button("Remove Program")) {
                             // Shift programs down
@@ -1668,12 +1856,14 @@ int main(int argc, char* argv[]) {
                                 strcpy(rsx->program_names[j], rsx->program_names[j + 1]);
                                 rsx->program_volumes[j] = rsx->program_volumes[j + 1];
                                 rsx->program_pans[j] = rsx->program_pans[j + 1];
+                                rsx->program_midi_channels[j] = rsx->program_midi_channels[j + 1];
                             }
                             // Clear last program
                             rsx->program_files[rsx->num_programs - 1][0] = '\0';
                             rsx->program_names[rsx->num_programs - 1][0] = '\0';
                             rsx->program_volumes[rsx->num_programs - 1] = 1.0f;
                             rsx->program_pans[rsx->num_programs - 1] = 0.5f;
+                            rsx->program_midi_channels[rsx->num_programs - 1] = -1;
                             rsx->num_programs--;
 
                             // Autosave
@@ -1694,6 +1884,7 @@ int main(int argc, char* argv[]) {
                             rsx->program_names[rsx->num_programs][0] = '\0';
                             rsx->program_volumes[rsx->num_programs] = 1.0f;  // Default volume (100%)
                             rsx->program_pans[rsx->num_programs] = 0.5f;     // Center pan
+                            rsx->program_midi_channels[rsx->num_programs] = -1;  // Omni by default
                             rsx->num_programs++;
 
                             // Autosave
@@ -2949,6 +3140,36 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
+                // MIDI Channel selection for Device 1
+                ImGui::SameLine();
+                ImGui::Text("Ch:");
+                ImGui::SameLine();
+                ImGui::PushItemWidth(100.0f);
+
+                char channel_preview_0[32];
+                if (config.midi_channel[0] == -1) {
+                    snprintf(channel_preview_0, sizeof(channel_preview_0), "Omni");
+                } else {
+                    snprintf(channel_preview_0, sizeof(channel_preview_0), "%d", config.midi_channel[0] + 1);
+                }
+
+                if (ImGui::BeginCombo("##midi_channel_0", channel_preview_0)) {
+                    if (ImGui::Selectable("Omni (All)", config.midi_channel[0] == -1)) {
+                        config.midi_channel[0] = -1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    for (int ch = 0; ch < 16; ch++) {
+                        char label[16];
+                        snprintf(label, sizeof(label), "%d", ch + 1);
+                        if (ImGui::Selectable(label, config.midi_channel[0] == ch)) {
+                            config.midi_channel[0] = ch;
+                            samplecrate_config_save(&config, "samplecrate.ini");
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
                 ImGui::Spacing();
                 ImGui::Spacing();
 
@@ -3000,6 +3221,36 @@ int main(int argc, char* argv[]) {
                                     midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES);
                                 }
                             }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                // MIDI Channel selection for Device 2
+                ImGui::SameLine();
+                ImGui::Text("Ch:");
+                ImGui::SameLine();
+                ImGui::PushItemWidth(100.0f);
+
+                char channel_preview_1[32];
+                if (config.midi_channel[1] == -1) {
+                    snprintf(channel_preview_1, sizeof(channel_preview_1), "Omni");
+                } else {
+                    snprintf(channel_preview_1, sizeof(channel_preview_1), "%d", config.midi_channel[1] + 1);
+                }
+
+                if (ImGui::BeginCombo("##midi_channel_1", channel_preview_1)) {
+                    if (ImGui::Selectable("Omni (All)", config.midi_channel[1] == -1)) {
+                        config.midi_channel[1] = -1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    for (int ch = 0; ch < 16; ch++) {
+                        char label[16];
+                        snprintf(label, sizeof(label), "%d", ch + 1);
+                        if (ImGui::Selectable(label, config.midi_channel[1] == ch)) {
+                            config.midi_channel[1] = ch;
+                            samplecrate_config_save(&config, "samplecrate.ini");
                         }
                     }
                     ImGui::EndCombo();
@@ -3059,6 +3310,10 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
+                ImGui::Text("Current Audio Device:");
+                ImGui::Spacing();
+
+                // Show current audio device info
                 ImGui::Text("Sample Rate: %d Hz", obtained.freq);
                 ImGui::Text("Channels: %d", (int)obtained.channels);
                 ImGui::Text("Buffer Size: %d samples", obtained.samples);
@@ -3067,8 +3322,48 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Audio device selection requires restart");
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Current device: SDL default");
+                // Audio device selection
+                ImGui::Text("Select Audio Output Device:");
+                ImGui::Spacing();
+
+                ImGui::PushItemWidth(400.0f);
+
+                // Build current device name for preview
+                char current_device_preview[256];
+                if (config.audio_device >= 0 && config.audio_device < num_audio_devices) {
+                    const char* device_name = SDL_GetAudioDeviceName(config.audio_device, 0);
+                    snprintf(current_device_preview, sizeof(current_device_preview),
+                             "Device %d: %s", config.audio_device, device_name ? device_name : "Unknown");
+                } else {
+                    snprintf(current_device_preview, sizeof(current_device_preview), "Default (System)");
+                }
+
+                if (ImGui::BeginCombo("##audio_device", current_device_preview)) {
+                    // Default option
+                    if (ImGui::Selectable("Default (System)", config.audio_device == -1)) {
+                        config.audio_device = -1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+
+                    // List all available audio devices
+                    for (int i = 0; i < num_audio_devices && i < 16; i++) {
+                        const char* device_name = SDL_GetAudioDeviceName(i, 0);
+                        char label[256];
+                        snprintf(label, sizeof(label), "Device %d: %s", i, device_name ? device_name : "Unknown");
+
+                        if (ImGui::Selectable(label, config.audio_device == i)) {
+                            config.audio_device = i;
+                            samplecrate_config_save(&config, "samplecrate.ini");
+                        }
+                    }
+
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f),
+                    "Audio device changes require application restart to take effect");
             }
         }
         ImGui::EndChild();
@@ -3095,7 +3390,9 @@ int main(int argc, char* argv[]) {
     ImGui::DestroyContext();
 
     // Close audio before destroying synth to avoid race conditions
-    SDL_CloseAudio();
+    if (current_audio_device_id != 0) {
+        SDL_CloseAudioDevice(current_audio_device_id);
+    }
 
     // Safely destroy synths
     {
