@@ -25,7 +25,10 @@ static void rtmidi_event_callback_1(double dt, const unsigned char *msg, size_t 
 }
 
 int midi_list_ports(void) {
+#ifndef _WIN32
+    // On Linux, check if ALSA sequencer is available
     if (access("/dev/snd/seq", F_OK) != 0) return 0;
+#endif
     RtMidiInPtr temp = rtmidi_in_create_default();
     if (!temp) return 0;
     unsigned int nports = rtmidi_get_port_count(temp);
@@ -35,8 +38,10 @@ int midi_list_ports(void) {
 
 int midi_get_port_name(int port, char *name_out, int bufsize) {
     if (!name_out || bufsize <= 0) return -1;
-    if (access("/dev/snd/seq", F_OK) != 0) return -1;
-
+#ifndef _WIN32
+    // On Linux, check if ALSA sequencer is available
+    if (access("/dev/snd/seq", F_OK) != 0) return 0;
+#endif
     RtMidiInPtr temp = rtmidi_in_create_default();
     if (!temp) return -1;
 
@@ -57,8 +62,10 @@ int midi_init(MidiEventCallback cb, void *userdata, int port) {
 }
 
 int midi_init_multi(MidiEventCallback cb, void *userdata, const int *ports, int num_ports) {
-    if (access("/dev/snd/seq", F_OK) != 0) return -1;
-
+#ifndef _WIN32
+    // On Linux, check if ALSA sequencer is available
+    if (access("/dev/snd/seq", F_OK) != 0) return 0;
+#endif
     if (num_ports > MIDI_MAX_DEVICES) num_ports = MIDI_MAX_DEVICES;
 
     midi_cb = cb;

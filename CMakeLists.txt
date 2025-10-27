@@ -60,3 +60,18 @@ target_link_libraries(samplecrate
     ${RTMIDI_LIBRARIES}
     ${SFIZZ_LIBRARIES}
 )
+
+# Windows-specific settings
+if(WIN32)
+    # Enable console window to see error messages and stdout
+    if(MINGW)
+        target_link_options(samplecrate PRIVATE -mconsole)
+    endif()
+
+    # Additional Windows libraries that might be needed
+    target_link_libraries(samplecrate
+        winmm      # Windows Multimedia API (for MIDI/Audio)
+        ole32      # COM support (may be needed by sfizz)
+        shlwapi    # Shell API (may be needed by sfizz file operations)
+    )
+endif()
