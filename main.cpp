@@ -1,8 +1,15 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
-#include "imgui_impl_opengl2.h"
-#include <SDL.h>
-#include <SDL_opengl.h>
+#ifdef __ANDROID__
+    #include "imgui_impl_opengl3.h"
+    #include <SDL.h>
+    #include <SDL_opengles2.h>
+#else
+    #include "imgui_impl_opengl2.h"
+    #include <SDL.h>
+    #include <SDL_opengl.h>
+#endif
+#include <SDL_main.h>  // Required for SDL_main support (Android, iOS, etc.)
 #include <sfizz.h>
 #include <thread>
 #include <atomic>
@@ -1003,6 +1010,11 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Main entry point
+// SDL_main.h remaps 'main' to 'SDL_main' on platforms that need it (Android, iOS)
+// and provides the actual main() that calls this function
+// -----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
     // Check for SFZ or RSX file argument
     const char* sfz_file = "assets/example.sfz";  // default
@@ -1089,8 +1101,17 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+#ifdef __ANDROID__
+    // Android: Request OpenGL ES 2.0
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
+    // Desktop: Request OpenGL 2.1
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+#endif
 
     SDL_Window* window = SDL_CreateWindow("samplecrate", 100, 100, 1200, 640, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
@@ -1099,7 +1120,14 @@ int main(int argc, char* argv[]) {
 
     ImGui::CreateContext();
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+
+#ifdef __ANDROID__
+    // Initialize ImGui OpenGL3 backend for OpenGL ES 2.0
+    ImGui_ImplOpenGL3_Init("#version 100");
+#else
+    // Initialize ImGui OpenGL2 backend for desktop
     ImGui_ImplOpenGL2_Init();
+#endif
 
     // Apply dark style (from mock-ui.cpp)
     ImGuiStyle& s = ImGui::GetStyle();
@@ -1424,7 +1452,11 @@ int main(int argc, char* argv[]) {
             }
         }
 
+#ifdef __ANDROID__
+        ImGui_ImplOpenGL3_NewFrame();
+#else
         ImGui_ImplOpenGL2_NewFrame();
+#endif
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
@@ -3374,7 +3406,11 @@ int main(int argc, char* argv[]) {
         glViewport(0, 0, (int)ImGui::GetIO().DisplaySize.x, (int)ImGui::GetIO().DisplaySize.y);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+#ifdef __ANDROID__
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#else
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+#endif
         SDL_GL_SwapWindow(window);
     }
 
@@ -3385,7 +3421,11 @@ int main(int argc, char* argv[]) {
         input_mappings_save(input_mappings, "samplecrate.ini");
     }
 
+#ifdef __ANDROID__
+    ImGui_ImplOpenGL3_Shutdown();
+#else
     ImGui_ImplOpenGL2_Shutdown();
+#endif
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
 
