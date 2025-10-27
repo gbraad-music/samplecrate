@@ -110,7 +110,7 @@ fi
 # Build SDL2 for Android
 echo ""
 echo "=== Building SDL2 for Android ==="
-if [ ! -f "$INSTALL_PREFIX/lib/libSDL2.a" ]; then
+if [ ! -f "$INSTALL_PREFIX/lib/libSDL2.so" ]; then
     SDL2_BUILD="build-sdl2-android-${ANDROID_ABI}"
     mkdir -p "$SDL2_BUILD"
     cd "$SDL2_BUILD"
@@ -132,7 +132,7 @@ if [ ! -f "$INSTALL_PREFIX/lib/libSDL2.a" ]; then
         -DANDROID_PLATFORM="android-${ANDROID_API_LEVEL}" \
         -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF
+        -DBUILD_SHARED_LIBS=ON
 
     make -j$(nproc)
     make install

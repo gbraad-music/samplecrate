@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB MIDI device filter -->
+    <!-- This allows the app to be notified when MIDI devices are connected -->
+    <usb-device class="1" subclass="3" protocol="0" />
+</resources>
