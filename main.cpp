@@ -87,6 +87,11 @@ bool fullscreen_pads_mode = false;
 // Expanded pads mode (config setting - 16 vs 32 pads)
 bool expanded_pads = false;
 
+// Track currently held pad for note_off on release
+int held_pad_index = -1;
+int held_pad_note = -1;
+sfizz_synth_t* held_pad_synth = nullptr;
+
 // UI mode
 enum UIMode {
     UI_MODE_INSTRUMENT = 0,
@@ -603,7 +608,10 @@ void handle_input_event(InputEvent* event) {
 
                     std::lock_guard<std::mutex> lock(synth_mutex);
                     if (target_synth) {
+                        // For CC triggers, just send note_on (no release event available)
+                        // The SFZ file's envelope/release settings will control the sound
                         sfizz_send_note_on(target_synth, 0, pad->note, velocity);
+
                         current_note = pad->note;
                         current_velocity = velocity;
 
@@ -907,7 +915,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
                 // Send note off for the pad's configured note
                 std::lock_guard<std::mutex> lock(synth_mutex);
-                if (target_synth) sfizz_send_note_off(target_synth, 0, pad->note, 0);
+                if (target_synth) 
                 return;  // Handled by pad
             }
         }
@@ -2355,7 +2363,12 @@ int main(int argc, char* argv[]) {
 
                             std::lock_guard<std::mutex> lock(synth_mutex);
                             if (target_synth) {
+                                // For test button, just send note_on
+                                // The SFZ file's envelope/release settings will control the sound
                                 sfizz_send_note_on(target_synth, 0, pad->note, velocity);
+
+                                current_note = pad->note;
+                                current_velocity = velocity;
                                 note_pad_fade[selected_pad] = 1.0f;
                             }
                         }
@@ -3309,44 +3322,65 @@ int main(int argc, char* argv[]) {
                             snprintf(pad_label, sizeof(pad_label), "N%d\n\n[Not Set]", pad_idx + 1);
                         }
 
-                        if (ImGui::Button(pad_label, ImVec2(padSize, padSize))) {
-                            if (learn_mode_active) {
-                                // Enter learn mode for this pad
-                                start_learn_for_action(ACTION_TRIGGER_NOTE_PAD, pad_idx);
-                            } else if (pad_configured) {
-                                // Trigger note
-                                int velocity = pad->velocity > 0 ? pad->velocity : 100;
+                        ImGui::Button(pad_label, ImVec2(padSize, padSize));
 
-                                // Determine which synth to use based on pad's program setting
-                                // For UI-clicked pads, use current_program as default (no device context)
-                                int target_prog = current_program;
-                                sfizz_synth_t* target_synth = nullptr;
-                                int actual_program = target_prog;
+                        bool is_active = ImGui::IsItemActive();
+                        bool was_held = (held_pad_index == pad_idx);
 
-                                if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
-                                    target_synth = program_synths[pad->program];
-                                    actual_program = pad->program;
-                                } else {
-                                    target_synth = program_synths[target_prog];
-                                }
+                        if (is_active && !was_held && pad_configured && !learn_mode_active) {
+                            // Button just pressed - send note_on
+                            int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
-                                std::lock_guard<std::mutex> lock(synth_mutex);
-                                if (target_synth) {
-                                    sfizz_send_note_on(target_synth, 0, pad->note, velocity);
-                                    current_note = pad->note;
-                                    current_velocity = velocity;
+                            // Determine which synth to use based on pad's program setting
+                            int target_prog = current_program;
+                            sfizz_synth_t* target_synth = nullptr;
+                            int actual_program = target_prog;
 
-                                    // Highlight ALL pads that would play this same note on this program
-                                    for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
-                                        NoteTriggerPad* check_pad = &rsx->pads[i];
-                                        if (check_pad->enabled && check_pad->note == pad->note) {
-                                            int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
-                                            if (check_pad_program == actual_program) {
-                                                note_pad_fade[i] = 1.0f;
-                                            }
+                            if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
+                                target_synth = program_synths[pad->program];
+                                actual_program = pad->program;
+                            } else {
+                                target_synth = program_synths[target_prog];
+                            }
+
+                            std::lock_guard<std::mutex> lock(synth_mutex);
+                            if (target_synth) {
+                                sfizz_send_note_on(target_synth, 0, pad->note, velocity);
+
+                                // Track which pad/note is held for note_off on release
+                                held_pad_index = pad_idx;
+                                held_pad_note = pad->note;
+                                held_pad_synth = target_synth;
+
+                                current_note = pad->note;
+                                current_velocity = velocity;
+
+                                // Highlight ALL pads that would play this same note on this program
+                                for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
+                                    NoteTriggerPad* check_pad = &rsx->pads[i];
+                                    if (check_pad->enabled && check_pad->note == pad->note) {
+                                        int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
+                                        if (check_pad_program == actual_program) {
+                                            note_pad_fade[i] = 1.0f;
                                         }
                                     }
                                 }
+                            }
+                        } else if (!is_active && was_held) {
+                            // Button just released - send note_off
+                            std::lock_guard<std::mutex> lock(synth_mutex);
+                            if (held_pad_synth && held_pad_note >= 0) {
+                                sfizz_send_note_off(held_pad_synth, 0, held_pad_note, 0);
+                            }
+                            held_pad_index = -1;
+                            held_pad_note = -1;
+                            held_pad_synth = nullptr;
+                        } else if (is_active && !pad_configured && !learn_mode_active) {
+                            // Clicked on unconfigured pad - do nothing
+                        } else if (is_active && learn_mode_active) {
+                            // Learn mode - start learning for this pad
+                            if (!was_held) {  // Only trigger once on initial press
+                                start_learn_for_action(ACTION_TRIGGER_NOTE_PAD, pad_idx);
                             }
                         }
 
@@ -3619,6 +3653,83 @@ int main(int argc, char* argv[]) {
                     ImGui::SameLine();
                     if (ImGui::Button("Reset to Defaults", ImVec2(200, 0))) {
                         input_mappings_reset_defaults(input_mappings);
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    // Display individual mappings
+                    ImGui::Text("Current MIDI Mappings:");
+                    ImGui::Spacing();
+
+                    if (input_mappings->midi_count == 0) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No MIDI mappings configured");
+                    } else {
+                        // Table header
+                        ImGui::Columns(5, "midi_mappings_table", true);
+                        ImGui::Text("Device");
+                        ImGui::NextColumn();
+                        ImGui::Text("CC");
+                        ImGui::NextColumn();
+                        ImGui::Text("Action");
+                        ImGui::NextColumn();
+                        ImGui::Text("Type");
+                        ImGui::NextColumn();
+                        ImGui::Text("");  // Remove button column
+                        ImGui::NextColumn();
+                        ImGui::Separator();
+
+                        // Display each mapping
+                        for (int i = 0; i < input_mappings->midi_count; i++) {
+                            MidiMapping* mapping = &input_mappings->midi_mappings[i];
+
+                            ImGui::PushID(i);
+
+                            // Device column
+                            if (mapping->device_id == -1) {
+                                ImGui::Text("Any");
+                            } else {
+                                ImGui::Text("%d", mapping->device_id);
+                            }
+                            ImGui::NextColumn();
+
+                            // CC column
+                            ImGui::Text("%d", mapping->cc_number);
+                            ImGui::NextColumn();
+
+                            // Action column (with parameter if applicable)
+                            const char* action_name = input_action_name(mapping->action);
+                            if (mapping->parameter > 0) {
+                                ImGui::Text("%s (%d)", action_name, mapping->parameter);
+                            } else {
+                                ImGui::Text("%s", action_name);
+                            }
+                            ImGui::NextColumn();
+
+                            // Type column
+                            if (mapping->continuous) {
+                                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Continuous");
+                            } else {
+                                ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.9f, 1.0f), "Button");
+                            }
+                            ImGui::NextColumn();
+
+                            // Remove button
+                            if (ImGui::Button("Remove", ImVec2(80, 0))) {
+                                // Shift remaining mappings down
+                                for (int j = i; j < input_mappings->midi_count - 1; j++) {
+                                    input_mappings->midi_mappings[j] = input_mappings->midi_mappings[j + 1];
+                                }
+                                input_mappings->midi_count--;
+                                i--;  // Check this index again since we shifted
+                            }
+                            ImGui::NextColumn();
+
+                            ImGui::PopID();
+                        }
+
+                        ImGui::Columns(1);
                     }
 
                     ImGui::Spacing();
