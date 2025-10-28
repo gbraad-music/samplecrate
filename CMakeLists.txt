@@ -50,6 +50,7 @@ add_executable(samplecrate
     regroove_effects.c
     midi.c
     input_mappings.c
+    sfz_builder.c
     ${IMGUI_SOURCES}
 )
 

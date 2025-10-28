@@ -11,6 +11,7 @@ extern "C" {
 #define RSX_MAX_PROGRAMS 4    // Support up to 4 programs (scenes)
 #define RSX_MAX_PATH 512
 #define RSX_MAX_DESCRIPTION 64
+#define RSX_MAX_SAMPLES_PER_PROGRAM 64  // Max samples per program
 
 // Effects settings for one effects chain
 typedef struct {
@@ -57,6 +58,25 @@ typedef struct {
     float delay_mix;
 } RSXEffectsSettings;
 
+// Sample mapping for programmatic SFZ building
+typedef struct {
+    char sample_path[RSX_MAX_PATH];  // Path to wave file
+    int key_low;                      // Low MIDI note (0-127)
+    int key_high;                     // High MIDI note (0-127)
+    int root_key;                     // Root pitch
+    int vel_low;                      // Low velocity (0-127)
+    int vel_high;                     // High velocity (0-127)
+    float amplitude;                  // Volume (0.0-1.0)
+    float pan;                        // Pan (-1.0=left, 0.0=center, 1.0=right)
+    int enabled;                      // 1=enabled, 0=disabled
+} RSXSampleMapping;
+
+// Program mode enumeration
+typedef enum {
+    PROGRAM_MODE_SFZ_FILE = 0,   // Load from SFZ file
+    PROGRAM_MODE_SAMPLES = 1      // Build from sample list
+} RSXProgramMode;
+
 // Note trigger pad configuration
 typedef struct {
     int note;                           // MIDI note number
@@ -83,6 +103,13 @@ typedef struct {
 
     // Per-program MIDI channel filtering (-1 = Omni/all channels, 0-15 = specific channel)
     int program_midi_channels[RSX_MAX_PROGRAMS];  // MIDI channel filter per program
+
+    // Program mode (SFZ file or sample-based)
+    RSXProgramMode program_modes[RSX_MAX_PROGRAMS];  // Mode for each program
+
+    // Sample-based program data
+    RSXSampleMapping program_samples[RSX_MAX_PROGRAMS][RSX_MAX_SAMPLES_PER_PROGRAM];  // Sample mappings
+    int program_sample_counts[RSX_MAX_PROGRAMS];  // Number of samples per program
 
     // FX chain enable states
     int master_fx_enable;                    // Master FX chain enable (0=off, 1=on)

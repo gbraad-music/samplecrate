@@ -66,6 +66,8 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->program_volumes[i] = 1.0f;  // Default volume (100%)
         rsx->program_pans[i] = 0.5f;     // Center pan
         rsx->program_midi_channels[i] = -1;  // Omni (all channels) by default
+        rsx->program_modes[i] = PROGRAM_MODE_SFZ_FILE;  // Default to SFZ file mode
+        rsx->program_sample_counts[i] = 0;  // No samples initially
     }
     rsx->num_pads = 0;
 
@@ -288,6 +290,49 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                         // prog_N_midi_channel
                         rsx->program_midi_channels[prog_idx] = atoi(value);
                         printf("DEBUG: Stored program %d midi_channel: %d\n", prog_num, rsx->program_midi_channels[prog_idx]);
+                    } else if (strstr(key, "_mode") != NULL) {
+                        // prog_N_mode
+                        rsx->program_modes[prog_idx] = (RSXProgramMode)atoi(value);
+                        printf("DEBUG: Stored program %d mode: %d\n", prog_num, rsx->program_modes[prog_idx]);
+                    } else if (strstr(key, "_sample_count") != NULL) {
+                        // prog_N_sample_count
+                        rsx->program_sample_counts[prog_idx] = atoi(value);
+                        if (prog_num > rsx->num_programs) {
+                            rsx->num_programs = prog_num;
+                        }
+                        printf("DEBUG: Stored program %d sample_count: %d (total programs: %d)\n", prog_num, rsx->program_sample_counts[prog_idx], rsx->num_programs);
+                    } else if (strstr(key, "_sample_") != NULL) {
+                        // prog_N_sample_M_<field>
+                        // Extract sample number: find "_sample_" and parse the number after it
+                        const char* sample_str = strstr(key, "_sample_");
+                        if (sample_str) {
+                            int sample_num = atoi(sample_str + 8);  // Skip "_sample_"
+                            if (sample_num >= 1 && sample_num <= RSX_MAX_SAMPLES_PER_PROGRAM) {
+                                int sample_idx = sample_num - 1;
+                                RSXSampleMapping* sample = &rsx->program_samples[prog_idx][sample_idx];
+
+                                if (strstr(key, "_path") != NULL) {
+                                    strncpy(sample->sample_path, value, sizeof(sample->sample_path) - 1);
+                                    sample->sample_path[sizeof(sample->sample_path) - 1] = '\0';
+                                } else if (strstr(key, "_key_low") != NULL) {
+                                    sample->key_low = atoi(value);
+                                } else if (strstr(key, "_key_high") != NULL) {
+                                    sample->key_high = atoi(value);
+                                } else if (strstr(key, "_root_key") != NULL) {
+                                    sample->root_key = atoi(value);
+                                } else if (strstr(key, "_vel_low") != NULL) {
+                                    sample->vel_low = atoi(value);
+                                } else if (strstr(key, "_vel_high") != NULL) {
+                                    sample->vel_high = atoi(value);
+                                } else if (strstr(key, "_amplitude") != NULL) {
+                                    sample->amplitude = atof(value);
+                                } else if (strstr(key, "_pan") != NULL && strstr(key, "_sample_") != NULL) {
+                                    sample->pan = atof(value);
+                                } else if (strstr(key, "_enabled") != NULL) {
+                                    sample->enabled = atoi(value);
+                                }
+                            }
+                        }
                     }
                 } else {
                     printf("DEBUG: prog_num %d out of range (1-%d)\n", prog_num, RSX_MAX_PROGRAMS);
@@ -453,13 +498,36 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             if (rsx->program_names[i][0] != '\0') {
                 fprintf(f, "prog_%d_name=\"%s\"\n", i + 1, rsx->program_names[i]);
             }
-            if (rsx->program_files[i][0] != '\0') {
+            fprintf(f, "prog_%d_mode=%d  ; 0=SFZ File, 1=Samples\n", i + 1, (int)rsx->program_modes[i]);
+
+            if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE && rsx->program_files[i][0] != '\0') {
                 fprintf(f, "prog_%d_file=\"%s\"\n", i + 1, rsx->program_files[i]);
             }
+
             fprintf(f, "prog_%d_volume=%.3f\n", i + 1, rsx->program_volumes[i]);
             fprintf(f, "prog_%d_pan=%.3f\n", i + 1, rsx->program_pans[i]);
             fprintf(f, "prog_%d_fx_enable=%d\n", i + 1, rsx->program_fx_enable[i]);
             fprintf(f, "prog_%d_midi_channel=%d  ; -1 = Omni, 0-15 = MIDI channel 1-16\n", i + 1, rsx->program_midi_channels[i]);
+
+            // Save sample data for sample-based programs
+            if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES) {
+                fprintf(f, "prog_%d_sample_count=%d\n", i + 1, rsx->program_sample_counts[i]);
+
+                for (int s = 0; s < rsx->program_sample_counts[i]; s++) {
+                    RSXSampleMapping* sample = &rsx->program_samples[i][s];
+                    int sample_num = s + 1;
+
+                    fprintf(f, "prog_%d_sample_%d_path=\"%s\"\n", i + 1, sample_num, sample->sample_path);
+                    fprintf(f, "prog_%d_sample_%d_key_low=%d\n", i + 1, sample_num, sample->key_low);
+                    fprintf(f, "prog_%d_sample_%d_key_high=%d\n", i + 1, sample_num, sample->key_high);
+                    fprintf(f, "prog_%d_sample_%d_root_key=%d\n", i + 1, sample_num, sample->root_key);
+                    fprintf(f, "prog_%d_sample_%d_vel_low=%d\n", i + 1, sample_num, sample->vel_low);
+                    fprintf(f, "prog_%d_sample_%d_vel_high=%d\n", i + 1, sample_num, sample->vel_high);
+                    fprintf(f, "prog_%d_sample_%d_amplitude=%.3f\n", i + 1, sample_num, sample->amplitude);
+                    fprintf(f, "prog_%d_sample_%d_pan=%.3f\n", i + 1, sample_num, sample->pan);
+                    fprintf(f, "prog_%d_sample_%d_enabled=%d\n", i + 1, sample_num, sample->enabled);
+                }
+            }
         }
         fprintf(f, "\n");
     }
@@ -553,14 +621,6 @@ void samplecrate_rsx_get_sfz_path(const char* rsx_path, const char* sfz_relative
                                    char* out_path, size_t out_size) {
     if (!rsx_path || !sfz_relative || !out_path || out_size == 0) return;
 
-    // Make a copy of rsx_path for dirname (it may modify the string)
-    char rsx_path_copy[RSX_MAX_PATH];
-    strncpy(rsx_path_copy, rsx_path, sizeof(rsx_path_copy) - 1);
-    rsx_path_copy[sizeof(rsx_path_copy) - 1] = '\0';
-
-    // Get directory of RSX file
-    char* dir = dirname(rsx_path_copy);
-
     // Make a copy of sfz_relative and convert backslashes to forward slashes
     char sfz_normalized[RSX_MAX_PATH];
     strncpy(sfz_normalized, sfz_relative, sizeof(sfz_normalized) - 1);
@@ -569,6 +629,35 @@ void samplecrate_rsx_get_sfz_path(const char* rsx_path, const char* sfz_relative
         if (*p == '\\') *p = '/';
     }
 
-    // Combine directory with relative SFZ path
-    snprintf(out_path, out_size, "%s/%s", dir, sfz_normalized);
+    // Check if path is already absolute (starts with '/')
+    if (sfz_normalized[0] == '/') {
+        // Absolute path - use as-is
+        strncpy(out_path, sfz_normalized, out_size - 1);
+        out_path[out_size - 1] = '\0';
+        return;
+    }
+
+    // Make a copy of rsx_path for dirname (it may modify the string)
+    char rsx_path_copy[RSX_MAX_PATH];
+    strncpy(rsx_path_copy, rsx_path, sizeof(rsx_path_copy) - 1);
+    rsx_path_copy[sizeof(rsx_path_copy) - 1] = '\0';
+
+    // Get directory of RSX file
+    char* dir = dirname(rsx_path_copy);
+
+    // Combine directory with relative path
+    char combined[RSX_MAX_PATH];
+    snprintf(combined, sizeof(combined), "%s/%s", dir, sfz_normalized);
+
+    // Resolve to absolute path using realpath
+    char* resolved = realpath(combined, NULL);
+    if (resolved) {
+        strncpy(out_path, resolved, out_size - 1);
+        out_path[out_size - 1] = '\0';
+        free(resolved);
+    } else {
+        // If realpath fails, just use the combined path
+        strncpy(out_path, combined, out_size - 1);
+        out_path[out_size - 1] = '\0';
+    }
 }

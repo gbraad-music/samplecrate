@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 #include <chrono>
+#include <libgen.h>
 
 extern "C" {
 #include "lcd.h"
@@ -20,6 +21,7 @@ extern "C" {
 #include "regroove_effects.h"
 #include "midi.h"
 #include "input_mappings.h"
+#include "sfz_builder.h"
 }
 
 sfizz_synth_t* synth = nullptr;  // Current/legacy synth
@@ -245,6 +247,106 @@ void save_note_suppression_to_rsx() {
 
     // Save to file
     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+}
+
+// Helper: reload a single program synth instance
+void reload_program(int program_idx) {
+    if (!rsx || program_idx < 0 || program_idx >= RSX_MAX_PROGRAMS) return;
+
+    std::lock_guard<std::mutex> lock(synth_mutex);
+
+    // Free existing synth if it exists
+    if (program_synths[program_idx]) {
+        sfizz_free(program_synths[program_idx]);
+        program_synths[program_idx] = nullptr;
+    }
+
+    // Skip if no content to load
+    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SFZ_FILE && rsx->program_files[program_idx][0] == '\0') return;
+    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SAMPLES && rsx->program_sample_counts[program_idx] == 0) return;
+
+    // Create new synth instance
+    program_synths[program_idx] = sfizz_create_synth();
+    sfizz_set_sample_rate(program_synths[program_idx], 44100);
+    sfizz_set_samples_per_block(program_synths[program_idx], 512);
+
+    bool load_success = false;
+
+    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SFZ_FILE) {
+        // Load from SFZ file
+        char sfz_path[512];
+        samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->program_files[program_idx], sfz_path, sizeof(sfz_path));
+
+        std::cout << "Reloading Program " << (program_idx + 1) << " (SFZ File: " << rsx->program_files[program_idx] << ")" << std::endl;
+        if (sfizz_load_file(program_synths[program_idx], sfz_path)) {
+            load_success = true;
+            int num_regions = sfizz_get_num_regions(program_synths[program_idx]);
+            std::cout << "  SUCCESS: Loaded " << num_regions << " regions" << std::endl;
+        } else {
+            std::cerr << "ERROR: Failed to load program " << (program_idx + 1) << ": " << sfz_path << std::endl;
+        }
+    }
+    else if (rsx->program_modes[program_idx] == PROGRAM_MODE_SAMPLES) {
+        // Build from samples
+        std::cout << "Reloading Program " << (program_idx + 1) << " (Samples: " << rsx->program_sample_counts[program_idx] << ")" << std::endl;
+
+        SFZBuilder* builder = sfz_builder_create(44100);
+        if (builder) {
+            for (int s = 0; s < rsx->program_sample_counts[program_idx]; s++) {
+                RSXSampleMapping* sample = &rsx->program_samples[program_idx][s];
+
+                // Only add samples that are enabled AND have a valid path
+                if (sample->enabled && sample->sample_path[0] != '\0') {
+                    // Use sample path as-is (sfizz will resolve relative to virtual path's directory)
+                    std::cout << "  Sample " << (s + 1) << ": " << sample->sample_path << std::endl;
+
+                    sfz_builder_add_region(builder,
+                                          sample->sample_path,
+                                          sample->key_low,
+                                          sample->key_high,
+                                          sample->root_key,
+                                          sample->vel_low,
+                                          sample->vel_high,
+                                          sample->amplitude,
+                                          sample->pan);
+                }
+            }
+
+            // Get RSX directory to write temp file
+            char rsx_dir[512];
+            strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
+            rsx_dir[sizeof(rsx_dir) - 1] = '\0';
+
+            char* dir = dirname(rsx_dir);
+            char absolute_dir[1024];
+            char* resolved = realpath(dir, absolute_dir);
+            const char* base_path = resolved ? absolute_dir : dir;
+
+            // Load directly using sfz_builder_load (tries string first, falls back to temp file)
+            if (sfz_builder_load(builder, program_synths[program_idx], base_path) == 0) {
+                load_success = true;
+                int num_regions = sfizz_get_num_regions(program_synths[program_idx]);
+                std::cout << "  SUCCESS: Built " << num_regions << " regions" << std::endl;
+            } else {
+                std::cerr << "ERROR: Failed to build program " << (program_idx + 1) << " from samples" << std::endl;
+            }
+
+            sfz_builder_destroy(builder);
+        }
+    }
+
+    if (!load_success) {
+        error_message = "Failed to load\nProgram " + std::to_string(program_idx + 1);
+        sfizz_free(program_synths[program_idx]);
+        program_synths[program_idx] = nullptr;
+    } else {
+        error_message = "";  // Clear error on success
+
+        // Update main synth pointer if this is the current program
+        if (current_program == program_idx) {
+            synth = program_synths[program_idx];
+        }
+    }
 }
 
 // Helper: save current effects state to RSX file (auto-save)
@@ -1221,25 +1323,86 @@ int main(int argc, char* argv[]) {
         std::cout << "Loading " << rsx->num_programs << " programs into separate synth instances" << std::endl;
 
         for (int i = 0; i < rsx->num_programs; i++) {
-            if (rsx->program_files[i][0] == '\0') continue;
-
-            // Get full SFZ path
-            char sfz_path[512];
-            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->program_files[i], sfz_path, sizeof(sfz_path));
+            // Skip empty programs
+            if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE && rsx->program_files[i][0] == '\0') continue;
+            if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES && rsx->program_sample_counts[i] == 0) continue;
 
             // Create synth instance for this program
             program_synths[i] = sfizz_create_synth();
             sfizz_set_sample_rate(program_synths[i], 44100);
             sfizz_set_samples_per_block(program_synths[i], 512);
 
-            std::cout << "Program " << (i + 1) << " (" << rsx->program_files[i] << "): loading..." << std::endl;
-            if (!sfizz_load_file(program_synths[i], sfz_path)) {
-                std::cerr << "ERROR: Failed to load program " << (i + 1) << ": " << sfz_path << std::endl;
+            bool load_success = false;
+            int num_regions = 0;
+
+            if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE) {
+                // Load from SFZ file
+                char sfz_path[512];
+                samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->program_files[i], sfz_path, sizeof(sfz_path));
+
+                std::cout << "Program " << (i + 1) << " (SFZ File: " << rsx->program_files[i] << "): loading..." << std::endl;
+                if (sfizz_load_file(program_synths[i], sfz_path)) {
+                    load_success = true;
+                    num_regions = sfizz_get_num_regions(program_synths[i]);
+                } else {
+                    std::cerr << "ERROR: Failed to load program " << (i + 1) << ": " << sfz_path << std::endl;
+                }
+            }
+            else if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES) {
+                // Build from samples
+                std::cout << "Program " << (i + 1) << " (Samples: " << rsx->program_sample_counts[i] << "): building..." << std::endl;
+
+                SFZBuilder* builder = sfz_builder_create(44100);
+                if (builder) {
+                    for (int s = 0; s < rsx->program_sample_counts[i]; s++) {
+                        RSXSampleMapping* sample = &rsx->program_samples[i][s];
+
+                        // Only add samples that are enabled AND have a valid path
+                        if (sample->enabled && sample->sample_path[0] != '\0') {
+                            // Use sample path as-is (sfizz will resolve relative to virtual path's directory)
+                            std::cout << "  Sample " << (s + 1) << ": " << sample->sample_path << std::endl;
+
+                            sfz_builder_add_region(builder,
+                                                  sample->sample_path,
+                                                  sample->key_low,
+                                                  sample->key_high,
+                                                  sample->root_key,
+                                                  sample->vel_low,
+                                                  sample->vel_high,
+                                                  sample->amplitude,
+                                                  sample->pan);
+                        }
+                    }
+
+                    // Get RSX directory to write temp file
+                    char rsx_dir[512];
+                    strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
+                    rsx_dir[sizeof(rsx_dir) - 1] = '\0';
+
+                    char* dir = dirname(rsx_dir);
+                    char absolute_dir[1024];
+                    char* resolved = realpath(dir, absolute_dir);
+                    const char* base_path = resolved ? absolute_dir : dir;
+
+                    // Load directly using sfz_builder_load (tries string first, falls back to temp file)
+                    if (sfz_builder_load(builder, program_synths[i], base_path) == 0) {
+                        load_success = true;
+                        num_regions = sfizz_get_num_regions(program_synths[i]);
+                    } else {
+                        std::cerr << "ERROR: Failed to build program " << (i + 1) << " from samples" << std::endl;
+                    }
+
+                    sfz_builder_destroy(builder);
+                } else {
+                    std::cerr << "ERROR: Failed to create SFZ builder for program " << (i + 1) << std::endl;
+                }
+            }
+
+            if (!load_success) {
                 error_message = "Failed to load\nProgram " + std::to_string(i + 1);
                 sfizz_free(program_synths[i]);
                 program_synths[i] = nullptr;
             } else {
-                int num_regions = sfizz_get_num_regions(program_synths[i]);
                 std::cout << "  SUCCESS: Loaded " << num_regions << " regions" << std::endl;
 
                 if (num_regions == 0) {
@@ -1763,19 +1926,157 @@ int main(int argc, char* argv[]) {
                         }
                         ImGui::PopItemWidth();
 
-                        // File input with label
-                        ImGui::Text("File:");
+                        // Mode indicator
+                        ImGui::Text("Mode:");
                         ImGui::SameLine(80);
-                        char file_label[32];
-                        snprintf(file_label, sizeof(file_label), "##prog%d_file", i);
-                        ImGui::PushItemWidth(300);
-                        if (ImGui::InputText(file_label, rsx->program_files[i], sizeof(rsx->program_files[i]))) {
-                            // Autosave on change
-                            if (!rsx_file_path.empty()) {
-                                samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                        if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES) {
+                            ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Samples");
+                        } else {
+                            ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.9f, 1.0f), "SFZ File");
+                        }
+
+                        // SFZ file input (only show for SFZ mode)
+                        if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE) {
+                            ImGui::Text("SFZ File:");
+                            ImGui::SameLine(80);
+                            char file_label[32];
+                            snprintf(file_label, sizeof(file_label), "##prog%d_file", i);
+                            ImGui::PushItemWidth(300);
+
+                            if (ImGui::InputText(file_label, rsx->program_files[i], sizeof(rsx->program_files[i]))) {
+                                // Autosave on change
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+
+                                // Auto-reload the program
+                                reload_program(i);
+                            }
+                            ImGui::PopItemWidth();
+                        }
+
+                        // Sample list (only for Samples mode)
+                        if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES) {
+                            ImGui::Text("Samples: %d/%d", rsx->program_sample_counts[i], RSX_MAX_SAMPLES_PER_PROGRAM);
+
+                            if (ImGui::Button("Add Sample##add_sample")) {
+                                if (rsx->program_sample_counts[i] < RSX_MAX_SAMPLES_PER_PROGRAM) {
+                                    int idx = rsx->program_sample_counts[i];
+                                    RSXSampleMapping* sample = &rsx->program_samples[i][idx];
+
+                                    // Initialize defaults
+                                    sample->sample_path[0] = '\0';
+                                    sample->key_low = 60;   // Middle C
+                                    sample->key_high = 60;
+                                    sample->root_key = 60;
+                                    sample->vel_low = 0;
+                                    sample->vel_high = 127;
+                                    sample->amplitude = 1.0f;
+                                    sample->pan = 0.0f;
+                                    sample->enabled = 1;
+
+                                    rsx->program_sample_counts[i]++;
+
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+
+                                    // Don't auto-reload - wait for user to set the sample path first
+                                }
+                            }
+
+                            // Show sample list
+                            for (int s = 0; s < rsx->program_sample_counts[i]; s++) {
+                                RSXSampleMapping* sample = &rsx->program_samples[i][s];
+                                ImGui::PushID(s);
+
+                                ImGui::Separator();
+                                ImGui::Text("Sample %d:", s + 1);
+
+                                char path_label[32];
+                                snprintf(path_label, sizeof(path_label), "Path##sample_%d", s);
+                                ImGui::PushItemWidth(350);
+                                ImGui::InputText(path_label, sample->sample_path, sizeof(sample->sample_path));
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after editing finished
+                                }
+                                ImGui::PopItemWidth();
+
+                                int note_low = sample->key_low;
+                                ImGui::SliderInt("Note Low", &note_low, 0, 127);
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                    std::cout << "Note Low changed from " << sample->key_low << " to " << note_low << std::endl;
+                                    sample->key_low = note_low;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after slider released
+                                } else {
+                                    sample->key_low = note_low;  // Update value while dragging
+                                }
+
+                                int note_high = sample->key_high;
+                                ImGui::SliderInt("Note High", &note_high, 0, 127);
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                    std::cout << "Note High changed from " << sample->key_high << " to " << note_high << std::endl;
+                                    sample->key_high = note_high;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after slider released
+                                } else {
+                                    sample->key_high = note_high;  // Update value while dragging
+                                }
+
+                                int root_key = sample->root_key;
+                                ImGui::SliderInt("Root Key", &root_key, 0, 127);
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                    std::cout << "Root Key changed from " << sample->root_key << " to " << root_key << std::endl;
+                                    sample->root_key = root_key;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after slider released
+                                } else {
+                                    sample->root_key = root_key;  // Update value while dragging
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("=Lo")) {
+                                    sample->root_key = sample->key_low;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);
+                                }
+                                ImGui::SameLine();
+                                ImGui::Text("(pitch center)");
+
+                                ImGui::SliderFloat("Volume", &sample->amplitude, 0.0f, 1.0f);
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after slider released
+                                }
+
+                                if (ImGui::Button("Remove")) {
+                                    // Shift samples down
+                                    for (int j = s; j < rsx->program_sample_counts[i] - 1; j++) {
+                                        rsx->program_samples[i][j] = rsx->program_samples[i][j + 1];
+                                    }
+                                    rsx->program_sample_counts[i]--;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(i);  // Auto-reload after removing sample
+                                }
+
+                                ImGui::PopID();
                             }
                         }
-                        ImGui::PopItemWidth();
 
                         // Volume slider with label
                         ImGui::Text("Volume:");
@@ -1876,15 +2177,34 @@ int main(int argc, char* argv[]) {
                         ImGui::PopID();
                     }
 
-                    // Add program button
+                    // Add program buttons - separate SFZ and Samples modes
                     if (rsx->num_programs < RSX_MAX_PROGRAMS) {
-                        if (ImGui::Button("Add Program")) {
-                            // Add a new empty program
+                        if (ImGui::Button("Add Program from SFZ", ImVec2(200, 0))) {
+                            // Add a new SFZ program
+                            rsx->program_modes[rsx->num_programs] = PROGRAM_MODE_SFZ_FILE;
                             rsx->program_files[rsx->num_programs][0] = '\0';
                             rsx->program_names[rsx->num_programs][0] = '\0';
                             rsx->program_volumes[rsx->num_programs] = 1.0f;  // Default volume (100%)
                             rsx->program_pans[rsx->num_programs] = 0.5f;     // Center pan
                             rsx->program_midi_channels[rsx->num_programs] = -1;  // Omni by default
+                            rsx->program_sample_counts[rsx->num_programs] = 0;   // No samples initially
+                            rsx->num_programs++;
+
+                            // Autosave
+                            if (!rsx_file_path.empty()) {
+                                samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                            }
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Add Program from Samples", ImVec2(200, 0))) {
+                            // Add a new Samples program
+                            rsx->program_modes[rsx->num_programs] = PROGRAM_MODE_SAMPLES;
+                            rsx->program_files[rsx->num_programs][0] = '\0';
+                            rsx->program_names[rsx->num_programs][0] = '\0';
+                            rsx->program_volumes[rsx->num_programs] = 1.0f;  // Default volume (100%)
+                            rsx->program_pans[rsx->num_programs] = 0.5f;     // Center pan
+                            rsx->program_midi_channels[rsx->num_programs] = -1;  // Omni by default
+                            rsx->program_sample_counts[rsx->num_programs] = 0;   // No samples initially
                             rsx->num_programs++;
 
                             // Autosave
@@ -2753,6 +3073,7 @@ int main(int argc, char* argv[]) {
                                 start_learn_for_action(ACTION_FX_DELAY_TOGGLE);
                             } else {
                                 regroove_effects_set_delay_enabled(effects, !delay_en);
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::PopStyleColor();
