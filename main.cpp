@@ -513,6 +513,7 @@ void handle_input_event(InputEvent* event) {
             if (fx && event->value > 63) {
                 int current = regroove_effects_get_distortion_enabled(fx);
                 regroove_effects_set_distortion_enabled(fx, !current);
+                autosave_effects_to_rsx();
             }
             break;
         }
@@ -521,6 +522,7 @@ void handle_input_event(InputEvent* event) {
             if (fx && event->value > 63) {
                 int current = regroove_effects_get_filter_enabled(fx);
                 regroove_effects_set_filter_enabled(fx, !current);
+                autosave_effects_to_rsx();
             }
             break;
         }
@@ -529,6 +531,7 @@ void handle_input_event(InputEvent* event) {
             if (fx && event->value > 63) {
                 int current = regroove_effects_get_eq_enabled(fx);
                 regroove_effects_set_eq_enabled(fx, !current);
+                autosave_effects_to_rsx();
             }
             break;
         }
@@ -537,6 +540,7 @@ void handle_input_event(InputEvent* event) {
             if (fx && event->value > 63) {
                 int current = regroove_effects_get_compressor_enabled(fx);
                 regroove_effects_set_compressor_enabled(fx, !current);
+                autosave_effects_to_rsx();
             }
             break;
         }
@@ -545,6 +549,7 @@ void handle_input_event(InputEvent* event) {
             if (fx && event->value > 63) {
                 int current = regroove_effects_get_delay_enabled(fx);
                 regroove_effects_set_delay_enabled(fx, !current);
+                autosave_effects_to_rsx();
             }
             break;
         }
@@ -2645,6 +2650,7 @@ int main(int argc, char* argv[]) {
                                 start_learn_for_action(ACTION_FX_DISTORTION_TOGGLE);
                             } else {
                                 regroove_effects_set_distortion_enabled(effects, !dist_en);
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::PopStyleColor();
@@ -2728,6 +2734,7 @@ int main(int argc, char* argv[]) {
                                 start_learn_for_action(ACTION_FX_FILTER_TOGGLE);
                             } else {
                                 regroove_effects_set_filter_enabled(effects, !filt_en);
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::PopStyleColor();
@@ -2809,6 +2816,7 @@ int main(int argc, char* argv[]) {
                                 start_learn_for_action(ACTION_FX_EQ_TOGGLE);
                             } else {
                                 regroove_effects_set_eq_enabled(effects, !eq_en);
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::PopStyleColor();
@@ -2922,6 +2930,7 @@ int main(int argc, char* argv[]) {
                                 start_learn_for_action(ACTION_FX_COMPRESSOR_TOGGLE);
                             } else {
                                 regroove_effects_set_compressor_enabled(effects, !comp_en);
+                                autosave_effects_to_rsx();
                             }
                         }
                         ImGui::PopStyleColor();
