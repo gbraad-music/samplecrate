@@ -32,11 +32,12 @@ typedef struct {
     // Device configuration
     int midi_device_0;   // MIDI device 0 port (-1 = not configured)
     int midi_device_1;   // MIDI device 1 port (-1 = not configured)
-    int midi_channel[2]; // MIDI channel filter per device (-1 = Omni/all channels, 0-15 = specific channel)
+    int midi_device_2;   // MIDI device 2 port (-1 = not configured)
+    int midi_channel[3]; // MIDI channel filter per device (-1 = Omni/all channels, 0-15 = specific channel)
     int audio_device;    // Audio output device (-1 = default)
     int expanded_pads;   // 0 = 16 pads, 1 = 32 pads
     int lock_ui_program_selection;  // 0 = allow UI control, 1 = lock to MIDI only
-    int midi_program_change_enabled[2];  // Per-device: 0 = ignore (UI selection leads), 1 = receive but don't change UI
+    int midi_program_change_enabled[3];  // Per-device: 0 = ignore (UI selection leads), 1 = receive but don't change UI
 
     // Mixer defaults
     float default_master_volume;

@@ -45,7 +45,7 @@ InputAction learn_target_action = ACTION_NONE;
 int learn_target_parameter = 0;
 
 // MIDI device configuration
-int midi_device_ports[MIDI_MAX_DEVICES] = {-1, -1};  // -1 = not configured
+int midi_device_ports[MIDI_MAX_DEVICES] = {-1, -1, -1};  // -1 = not configured
 
 // Audio device configuration
 SDL_AudioDeviceID current_audio_device_id = 0;  // Current audio device ID
@@ -65,7 +65,7 @@ bool note_suppressed[128][5] = {false};
 
 // Current program selection (which SFZ is loaded)
 int current_program = 0;  // 0-3 for programs 1-4 (UI selection)
-int midi_target_program[2] = {0, 0};  // Per-device MIDI routing (set by program change messages)
+int midi_target_program[3] = {0, 0, 0};  // Per-device MIDI routing (set by program change messages)
 
 // MIDI clock tracking
 struct {
@@ -420,6 +420,9 @@ void switch_program(int program_index) {
     }
     if (!config.midi_program_change_enabled[1]) {
         midi_target_program[1] = program_index;
+    }
+    if (!config.midi_program_change_enabled[2]) {
+        midi_target_program[2] = program_index;
     }
 
     std::cout << "Switching to program " << (program_index + 1) << ": " << rsx->program_files[program_index] << std::endl;
@@ -1348,6 +1351,7 @@ int main(int argc, char* argv[]) {
             current_program = 0;
             midi_target_program[0] = 0;  // Initialize MIDI routing to first program
             midi_target_program[1] = 0;
+            midi_target_program[2] = 0;
             error_message = "";  // Clear error if first program loaded successfully
         }
 
@@ -1464,6 +1468,7 @@ int main(int argc, char* argv[]) {
         // If not configured (-1), use port 0 for first device
         midi_device_ports[0] = config.midi_device_0;
         midi_device_ports[1] = config.midi_device_1;
+        midi_device_ports[2] = config.midi_device_2;
 
         // If first device not configured, default to port 0
         if (midi_device_ports[0] == -1 && num_midi_ports > 0) {
@@ -1478,6 +1483,9 @@ int main(int argc, char* argv[]) {
             }
             if (midi_device_ports[1] >= 0) {
                 std::cout << "  Device 1: port " << midi_device_ports[1] << std::endl;
+            }
+            if (midi_device_ports[2] >= 0) {
+                std::cout << "  Device 2: port " << midi_device_ports[2] << std::endl;
             }
         } else {
             std::cout << "MIDI initialization failed, continuing without MIDI support" << std::endl;
@@ -3540,6 +3548,93 @@ int main(int argc, char* argv[]) {
 
                 ImGui::Spacing();
                 ImGui::Spacing();
+
+                // Device 3 selection
+                ImGui::Text("MIDI Device 3:");
+                ImGui::PushItemWidth(300.0f);
+
+                // Get current selection from global state
+                int selected_port_2 = midi_device_ports[2];
+
+                // Build preview label showing current selection
+                char preview_label_2[256];
+                if (selected_port_2 == -1) {
+                    snprintf(preview_label_2, sizeof(preview_label_2), "Not configured");
+                } else {
+                    char port_name[128];
+                    if (midi_get_port_name(selected_port_2, port_name, sizeof(port_name)) == 0) {
+                        snprintf(preview_label_2, sizeof(preview_label_2), "Port %d: %s", selected_port_2, port_name);
+                    } else {
+                        snprintf(preview_label_2, sizeof(preview_label_2), "Port %d", selected_port_2);
+                    }
+                }
+
+                if (ImGui::BeginCombo("##midi_device_3", preview_label_2)) {
+                    if (ImGui::Selectable("Not configured", selected_port_2 == -1)) {
+                        midi_device_ports[2] = -1;
+                        config.midi_device_2 = -1;
+                        // Save config immediately
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                        // Reinitialize MIDI with new configuration
+                        midi_deinit();
+                        if (midi_device_ports[0] >= 0 || midi_device_ports[1] >= 0 || midi_device_ports[2] >= 0) {
+                            midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES);
+                        }
+                    }
+                    for (int i = 0; i < num_ports && i < 16; i++) {
+                        char port_name[128];
+                        if (midi_get_port_name(i, port_name, sizeof(port_name)) == 0) {
+                            char label[256];
+                            snprintf(label, sizeof(label), "Port %d: %s", i, port_name);
+                            if (ImGui::Selectable(label, selected_port_2 == i)) {
+                                midi_device_ports[2] = i;
+                                config.midi_device_2 = i;
+                                // Save config immediately
+                                samplecrate_config_save(&config, "samplecrate.ini");
+                                // Reinitialize MIDI with new configuration
+                                midi_deinit();
+                                if (midi_device_ports[0] >= 0 || midi_device_ports[1] >= 0 || midi_device_ports[2] >= 0) {
+                                    midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES);
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                // MIDI Channel selection for Device 3
+                ImGui::SameLine();
+                ImGui::Text("Ch:");
+                ImGui::SameLine();
+                ImGui::PushItemWidth(100.0f);
+
+                char channel_preview_2[32];
+                if (config.midi_channel[2] == -1) {
+                    snprintf(channel_preview_2, sizeof(channel_preview_2), "Omni");
+                } else {
+                    snprintf(channel_preview_2, sizeof(channel_preview_2), "%d", config.midi_channel[2] + 1);
+                }
+
+                if (ImGui::BeginCombo("##midi_channel_2", channel_preview_2)) {
+                    if (ImGui::Selectable("Omni (All)", config.midi_channel[2] == -1)) {
+                        config.midi_channel[2] = -1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    for (int ch = 0; ch < 16; ch++) {
+                        char label[16];
+                        snprintf(label, sizeof(label), "%d", ch + 1);
+                        if (ImGui::Selectable(label, config.midi_channel[2] == ch)) {
+                            config.midi_channel[2] = ch;
+                            samplecrate_config_save(&config, "samplecrate.ini");
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                ImGui::Spacing();
+                ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 
@@ -3557,6 +3652,13 @@ int main(int argc, char* argv[]) {
                 bool pc_enabled_1 = (config.midi_program_change_enabled[1] != 0);
                 if (ImGui::Checkbox("Device 1: Respond to Program Change", &pc_enabled_1)) {
                     config.midi_program_change_enabled[1] = pc_enabled_1 ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+
+                // Device 2
+                bool pc_enabled_2 = (config.midi_program_change_enabled[2] != 0);
+                if (ImGui::Checkbox("Device 2: Respond to Program Change", &pc_enabled_2)) {
+                    config.midi_program_change_enabled[2] = pc_enabled_2 ? 1 : 0;
                     samplecrate_config_save(&config, "samplecrate.ini");
                 }
 

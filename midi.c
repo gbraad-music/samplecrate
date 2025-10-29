@@ -24,6 +24,14 @@ static void rtmidi_event_callback_1(double dt, const unsigned char *msg, size_t 
     }
 }
 
+static void rtmidi_event_callback_2(double dt, const unsigned char *msg, size_t sz, void *userdata) {
+    if (midi_cb && sz >= 1) {
+        unsigned char data1 = (sz >= 2) ? msg[1] : 0;
+        unsigned char data2 = (sz >= 3) ? msg[2] : 0;
+        midi_cb(msg[0], data1, data2, 2, cb_userdata);
+    }
+}
+
 int midi_list_ports(void) {
 #ifndef _WIN32
     // On Linux, check if ALSA sequencer is available
@@ -72,7 +80,7 @@ int midi_init_multi(MidiEventCallback cb, void *userdata, const int *ports, int 
     cb_userdata = userdata;
 
     int opened = 0;
-    RtMidiCCallback callbacks[MIDI_MAX_DEVICES] = {rtmidi_event_callback_0, rtmidi_event_callback_1};
+    RtMidiCCallback callbacks[MIDI_MAX_DEVICES] = {rtmidi_event_callback_0, rtmidi_event_callback_1, rtmidi_event_callback_2};
 
     for (int dev = 0; dev < num_ports; dev++) {
         if (ports[dev] < 0) continue;  // Skip if port is -1
