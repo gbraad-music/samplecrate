@@ -8,11 +8,17 @@
 #include <atomic>
 #include <vector>
 #include <iostream>
-#include <unistd.h>
 #include <cstring>
 #include <mutex>
 #include <chrono>
 #include <libgen.h>
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <direct.h>
+#include <stdlib.h>
+#define getcwd _getcwd
+#endif
 
 extern "C" {
 #include "lcd.h"
@@ -22,6 +28,17 @@ extern "C" {
 #include "midi.h"
 #include "input_mappings.h"
 #include "sfz_builder.h"
+#include "midi_file_player.h"
+#include "midi_file_pad_player.h"
+}
+
+// Cross-platform realpath wrapper
+static char* cross_platform_realpath(const char* path, char* resolved_path) {
+#ifdef _WIN32
+    return _fullpath(resolved_path, path, 1024);
+#else
+    return realpath(path, resolved_path);
+#endif
 }
 
 sfizz_synth_t* synth = nullptr;  // Current/legacy synth
@@ -54,6 +71,12 @@ int num_audio_devices = 0;  // Number of available audio output devices
 // RSX file (note pads and SFZ wrapper)
 SamplecrateRSX* rsx = nullptr;
 std::string rsx_file_path = "";
+
+// MIDI file pad player
+MidiFilePadPlayer* midi_pad_player = nullptr;
+
+// Pad index storage for MIDI file callbacks (so each pad knows which program to use)
+int midi_pad_indices[RSX_MAX_NOTE_PADS];
 
 // Note pad visual feedback
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
@@ -323,7 +346,7 @@ void reload_program(int program_idx) {
 
             char* dir = dirname(rsx_dir);
             char absolute_dir[1024];
-            char* resolved = realpath(dir, absolute_dir);
+            char* resolved = cross_platform_realpath(dir, absolute_dir);
             const char* base_path = resolved ? absolute_dir : dir;
 
             // Load directly using sfz_builder_load (tries string first, falls back to temp file)
@@ -1038,6 +1061,41 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     }
 }
 
+// MIDI file player callback - sends note events to the appropriate synth
+void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
+    std::lock_guard<std::mutex> lock(synth_mutex);
+
+    // Get pad index from userdata to determine which program to use
+    int pad_index = userdata ? *((int*)userdata) : -1;
+
+    std::cout << "MIDI file event: pad=" << pad_index << " note=" << note << " velocity=" << velocity << " on=" << on << std::endl;
+
+    // Determine target program based on pad configuration
+    int target_program = current_program;
+    if (rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
+        NoteTriggerPad* pad = &rsx->pads[pad_index];
+        if (pad->program >= 0 && pad->program < rsx->num_programs) {
+            target_program = pad->program;
+        }
+    }
+
+    std::cout << "  Using program " << target_program << std::endl;
+
+    // Send to target program synth
+    sfizz_synth_t* target_synth = program_synths[target_program];
+    if (target_synth) {
+        if (on) {
+            std::cout << "  Sending note_on to synth" << std::endl;
+            sfizz_send_note_on(target_synth, 0, note, velocity);
+        } else {
+            std::cout << "  Sending note_off to synth" << std::endl;
+            sfizz_send_note_off(target_synth, 0, note, 0);
+        }
+    } else {
+        std::cout << "  ERROR: No target synth for program " << target_program << "!" << std::endl;
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Check for SFZ or RSX file argument
     const char* sfz_file = "assets/example.sfz";  // default
@@ -1246,6 +1304,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Initialize MIDI file pad player
+    midi_pad_player = midi_file_pad_player_create();
+    if (midi_pad_player) {
+        midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
+        midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
+    }
+
+    // Initialize pad indices array for MIDI file callbacks
+    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+        midi_pad_indices[i] = i;
+    }
+
     // Init sfizz - create main synth and program synths
     synth = sfizz_create_synth();
     sfizz_set_sample_rate(synth, 44100);
@@ -1314,7 +1384,7 @@ int main(int argc, char* argv[]) {
 
                     char* dir = dirname(rsx_dir);
                     char absolute_dir[1024];
-                    char* resolved = realpath(dir, absolute_dir);
+                    char* resolved = cross_platform_realpath(dir, absolute_dir);
                     const char* base_path = resolved ? absolute_dir : dir;
 
                     // Load directly using sfz_builder_load (tries string first, falls back to temp file)
@@ -1385,6 +1455,23 @@ int main(int argc, char* argv[]) {
         // Load note suppression settings from RSX
         load_note_suppression_from_rsx();
         std::cout << "Note suppression settings loaded from RSX" << std::endl;
+
+        // Load MIDI files for all configured pads
+        if (midi_pad_player) {
+            std::cout << "Loading MIDI files for pads..." << std::endl;
+            for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+                if (rsx->pads[i].midi_file[0] != '\0') {
+                    char midi_path[512];
+                    samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
+
+                    if (midi_file_pad_player_load(midi_pad_player, i, midi_path, &midi_pad_indices[i]) == 0) {
+                        std::cout << "  Pad " << (i + 1) << ": Loaded MIDI file " << midi_path << std::endl;
+                    } else {
+                        std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file " << midi_path << std::endl;
+                    }
+                }
+            }
+        }
     } else {
         // No programs defined, load single SFZ file into main synth
         std::cout << "Loading SFZ file into sfizz: " << sfz_file << std::endl;
@@ -1528,6 +1615,11 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+
+        // Update MIDI file players (delta time ~16.67ms at 60fps)
+        if (midi_pad_player) {
+            midi_file_pad_player_update_all(midi_pad_player, 16.67f);
+        }
 
         // Update note pad fade effects
         for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
@@ -2267,6 +2359,53 @@ int main(int argc, char* argv[]) {
                             pad->program = current_item - 1;  // 0 becomes -1 (No program), 1 becomes 0 (Prog 1), etc.
                             rsx_changed = true;
                         }
+                    }
+
+                    // MIDI File path (optional - for playing MIDI files instead of single notes)
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    ImGui::Text("MIDI File Playback (optional):");
+                    ImGui::TextWrapped("Leave empty to trigger a single note. Set a MIDI file path to play that file when pad is triggered.");
+
+                    if (ImGui::InputText("MIDI File Path", pad->midi_file, sizeof(pad->midi_file))) {
+                        rsx_changed = true;
+
+                        // Load MIDI file immediately when path is changed
+                        if (midi_pad_player && pad->midi_file[0] != '\0') {
+                            // Enable the pad when MIDI file is set
+                            if (!pad->enabled) {
+                                pad->enabled = 1;
+                                std::cout << "Auto-enabled pad " << (selected_pad + 1) << " for MIDI file playback" << std::endl;
+                            }
+
+                            // Get full path relative to RSX file
+                            char midi_path[512];
+                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
+
+                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
+                            } else {
+                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                            }
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear")) {
+                        pad->midi_file[0] = '\0';
+                        rsx_changed = true;
+
+                        // Unload MIDI file
+                        if (midi_pad_player) {
+                            midi_file_pad_player_unload(midi_pad_player, selected_pad);
+                        }
+                    }
+
+                    // Show status if MIDI file is set
+                    if (pad->midi_file[0] != '\0') {
+                        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "MIDI file configured: %s", pad->midi_file);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Single note mode (no MIDI file)");
                     }
 
                     // Autosave RSX if any changes were made
@@ -3194,7 +3333,7 @@ int main(int argc, char* argv[]) {
 
                         // Get pad configuration (may be null if no RSX loaded)
                         NoteTriggerPad* pad = (rsx && pad_idx < rsx->num_pads) ? &rsx->pads[pad_idx] : nullptr;
-                        bool pad_configured = (pad && pad->note >= 0 && pad->enabled);
+                        bool pad_configured = (pad && pad->enabled && (pad->note >= 0 || pad->midi_file[0] != '\0'));
 
                         // Pad button with fade effect
                         float fade = note_pad_fade[pad_idx];
@@ -3219,37 +3358,79 @@ int main(int argc, char* argv[]) {
                         // Pad label
                         char pad_label[128];
                         if (pad_configured) {
-                            // Show program assignment if pad is assigned to a specific program
-                            if (pad->program >= 0 && pad->program < rsx->num_programs) {
-                                const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
-                                    ? rsx->program_names[pad->program]
-                                    : "";
-                                if (assigned_prog_name[0] != '\0') {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n%s",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            assigned_prog_name);
+                            // Check if this is a MIDI file pad or single note pad
+                            if (pad->midi_file[0] != '\0') {
+                                // MIDI file mode - show filename and program
+                                // Extract just the filename from the path
+                                const char* filename = strrchr(pad->midi_file, '/');
+                                if (!filename) filename = strrchr(pad->midi_file, '\\');
+                                if (!filename) filename = pad->midi_file;
+                                else filename++;  // Skip the slash
+
+                                if (pad->program >= 0 && pad->program < rsx->num_programs) {
+                                    const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
+                                        ? rsx->program_names[pad->program]
+                                        : "";
+                                    if (assigned_prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n%s",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                assigned_prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\nPrg %d",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                pad->program + 1);
+                                    }
                                 } else {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\nPrg %d",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            pad->program + 1);
+                                    const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
+                                        ? rsx->program_names[current_program]
+                                        : "";
+                                    if (prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n[%s]",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n[Prg %d]",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                current_program + 1);
+                                    }
                                 }
                             } else {
-                                // No specific program: show current UI program in brackets
-                                const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
-                                    ? rsx->program_names[current_program]
-                                    : "";
-                                if (prog_name[0] != '\0') {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[%s]",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            prog_name);
+                                // Single note mode - show note and program
+                                if (pad->program >= 0 && pad->program < rsx->num_programs) {
+                                    const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
+                                        ? rsx->program_names[pad->program]
+                                        : "";
+                                    if (assigned_prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n%s",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                assigned_prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\nPrg %d",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                pad->program + 1);
+                                    }
                                 } else {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[Prg %d]",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            current_program + 1);
+                                    // No specific program: show current UI program in brackets
+                                    const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
+                                        ? rsx->program_names[current_program]
+                                        : "";
+                                    if (prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[%s]",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[Prg %d]",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                current_program + 1);
+                                    }
                                 }
                             }
                         } else {
@@ -3262,40 +3443,49 @@ int main(int argc, char* argv[]) {
                         bool was_held = (held_pad_index == pad_idx);
 
                         if (is_active && !was_held && pad_configured && !learn_mode_active) {
-                            // Button just pressed - send note_on
+                            // Button just pressed
                             int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
-                            // Determine which synth to use based on pad's program setting
-                            int target_prog = current_program;
-                            sfizz_synth_t* target_synth = nullptr;
-                            int actual_program = target_prog;
-
-                            if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
-                                target_synth = program_synths[pad->program];
-                                actual_program = pad->program;
+                            // Check if pad has MIDI file configured
+                            if (midi_pad_player && pad->midi_file[0] != '\0') {
+                                // Trigger MIDI file playback
+                                std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                note_pad_fade[pad_idx] = 1.0f;
                             } else {
-                                target_synth = program_synths[target_prog];
-                            }
+                                // Regular single note trigger
+                                // Determine which synth to use based on pad's program setting
+                                int target_prog = current_program;
+                                sfizz_synth_t* target_synth = nullptr;
+                                int actual_program = target_prog;
 
-                            std::lock_guard<std::mutex> lock(synth_mutex);
-                            if (target_synth) {
-                                sfizz_send_note_on(target_synth, 0, pad->note, velocity);
+                                if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
+                                    target_synth = program_synths[pad->program];
+                                    actual_program = pad->program;
+                                } else {
+                                    target_synth = program_synths[target_prog];
+                                }
 
-                                // Track which pad/note is held for note_off on release
-                                held_pad_index = pad_idx;
-                                held_pad_note = pad->note;
-                                held_pad_synth = target_synth;
+                                std::lock_guard<std::mutex> lock(synth_mutex);
+                                if (target_synth) {
+                                    sfizz_send_note_on(target_synth, 0, pad->note, velocity);
 
-                                current_note = pad->note;
-                                current_velocity = velocity;
+                                    // Track which pad/note is held for note_off on release
+                                    held_pad_index = pad_idx;
+                                    held_pad_note = pad->note;
+                                    held_pad_synth = target_synth;
 
-                                // Highlight ALL pads that would play this same note on this program
-                                for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
-                                    NoteTriggerPad* check_pad = &rsx->pads[i];
-                                    if (check_pad->enabled && check_pad->note == pad->note) {
-                                        int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
-                                        if (check_pad_program == actual_program) {
-                                            note_pad_fade[i] = 1.0f;
+                                    current_note = pad->note;
+                                    current_velocity = velocity;
+
+                                    // Highlight ALL pads that would play this same note on this program
+                                    for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
+                                        NoteTriggerPad* check_pad = &rsx->pads[i];
+                                        if (check_pad->enabled && check_pad->note == pad->note) {
+                                            int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
+                                            if (check_pad_program == actual_program) {
+                                                note_pad_fade[i] = 1.0f;
+                                            }
                                         }
                                     }
                                 }
@@ -3894,6 +4084,9 @@ int main(int argc, char* argv[]) {
         if (effects_program[i]) {
             regroove_effects_destroy(effects_program[i]);
         }
+    }
+    if (midi_pad_player) {
+        midi_file_pad_player_destroy(midi_pad_player);
     }
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);

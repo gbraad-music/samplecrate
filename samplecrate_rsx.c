@@ -6,6 +6,28 @@
 #include <math.h>
 #include <libgen.h>
 
+// Cross-platform realpath wrapper
+static char* cross_platform_realpath(const char* path, char* resolved_path, size_t resolved_size) {
+#ifdef _WIN32
+    // Windows: use _fullpath
+    return _fullpath(resolved_path, path, resolved_size);
+#else
+    // POSIX: use realpath (resolved_path can be NULL to allocate)
+    if (resolved_path == NULL) {
+        return realpath(path, NULL);
+    } else {
+        char* result = realpath(path, NULL);
+        if (result) {
+            strncpy(resolved_path, result, resolved_size - 1);
+            resolved_path[resolved_size - 1] = '\0';
+            free(result);
+            return resolved_path;
+        }
+        return NULL;
+    }
+#endif
+}
+
 // Helper: initialize effects settings with defaults (matching samplecrate_common.c)
 static void init_effects_defaults(RSXEffectsSettings* fx) {
     if (!fx) return;
@@ -418,6 +440,9 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                     rsx->pads[pad_idx].enabled = atoi(value);
                 } else if (strcmp(prop, "program") == 0) {
                     rsx->pads[pad_idx].program = atoi(value);
+                } else if (strcmp(prop, "midi_file") == 0) {
+                    strncpy(rsx->pads[pad_idx].midi_file, value, sizeof(rsx->pads[pad_idx].midi_file) - 1);
+                    rsx->pads[pad_idx].midi_file[sizeof(rsx->pads[pad_idx].midi_file) - 1] = '\0';
                 }
             }
         }
@@ -610,6 +635,10 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             fprintf(f, "pad_N%d_program=%d\n", pad_num, rsx->pads[i].program);
         }
 
+        if (rsx->pads[i].midi_file[0] != '\0') {
+            fprintf(f, "pad_N%d_midi_file=\"%s\"\n", pad_num, rsx->pads[i].midi_file);
+        }
+
         fprintf(f, "\n");
     }
 
@@ -649,8 +678,8 @@ void samplecrate_rsx_get_sfz_path(const char* rsx_path, const char* sfz_relative
     char combined[RSX_MAX_PATH];
     snprintf(combined, sizeof(combined), "%s/%s", dir, sfz_normalized);
 
-    // Resolve to absolute path using realpath
-    char* resolved = realpath(combined, NULL);
+    // Resolve to absolute path using cross-platform realpath
+    char* resolved = cross_platform_realpath(combined, NULL, RSX_MAX_PATH);
     if (resolved) {
         strncpy(out_path, resolved, out_size - 1);
         out_path[out_size - 1] = '\0';
