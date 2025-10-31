@@ -185,6 +185,17 @@ void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_
     }
 }
 
+// Update all active pad players with sample-accurate timing (call from audio callback)
+void midi_file_pad_player_update_all_samples(MidiFilePadPlayer* pad_player, int num_samples, int sample_rate, int current_beat) {
+    if (!pad_player) return;
+
+    for (int i = 0; i < MAX_PAD_PLAYERS; i++) {
+        if (pad_player->players[i]) {
+            midi_file_player_update_samples(pad_player->players[i], num_samples, sample_rate, current_beat);
+        }
+    }
+}
+
 // Check if a specific pad is playing
 int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index) {
     if (!pad_player || pad_index < 0 || pad_index >= MAX_PAD_PLAYERS) return 0;

@@ -63,6 +63,12 @@ int midi_file_player_get_loop(MidiFilePlayer* player);
 // current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
 void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current_beat);
 
+// Update playback with sample-accurate timing (call from audio callback)
+// num_samples: number of audio samples to advance
+// sample_rate: audio sample rate in Hz (e.g., 44100)
+// current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
+void midi_file_player_update_samples(MidiFilePlayer* player, int num_samples, int sample_rate, int current_beat);
+
 // Get current playback position in seconds
 float midi_file_player_get_position(MidiFilePlayer* player);
 

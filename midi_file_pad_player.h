@@ -56,6 +56,12 @@ void midi_file_pad_player_set_loop(MidiFilePadPlayer* pad_player, int loop);
 // current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
 void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms, int current_beat);
 
+// Update all active pad players with sample-accurate timing (call from audio callback)
+// num_samples: number of audio samples to advance
+// sample_rate: audio sample rate in Hz (e.g., 44100)
+// current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
+void midi_file_pad_player_update_all_samples(MidiFilePadPlayer* pad_player, int num_samples, int sample_rate, int current_beat);
+
 // Check if a specific pad is playing
 int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index);
 

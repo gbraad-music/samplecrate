@@ -82,7 +82,8 @@ int midi_pad_indices[RSX_MAX_NOTE_PADS];
 int midi_quantize_beats = 1;  // Quantize to this many beats (1=quarter, 2=half, 4=bar)
 
 // Note pad visual feedback
-float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
+float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
+float note_pad_loop_fade[RSX_MAX_NOTE_PADS] = {0.0f};      // Loop restart fade (blue/cyan)
 
 // Note suppression state (128 MIDI notes, 0-127)
 // [note][0] = global suppression (program -1)
@@ -960,6 +961,13 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     float* out = reinterpret_cast<float*>(stream);
     int frames = len / (sizeof(float) * 2); // stereo
 
+    // Update MIDI file playback BEFORE acquiring the lock
+    // This runs in the audio thread for perfect timing (no UI blocking!)
+    // The MIDI event callbacks will acquire the lock themselves
+    if (midi_pad_player) {
+        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, -1);
+    }
+
     std::lock_guard<std::mutex> lock(synth_mutex);
 
     // Create temporary buffers for left and right channels
@@ -1071,9 +1079,15 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
 void midi_file_loop_callback(void* userdata) {
     int pad_index = userdata ? *((int*)userdata) : -1;
     if (pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
-        note_pad_fade[pad_index] = 1.5f;  // Trigger blink on loop restart
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "[" << ms << "] LOOP pad=" << (pad_index + 1) << std::endl;
+        note_pad_loop_fade[pad_index] = 1.0f;  // Trigger blue/cyan blink on loop restart
     }
 }
+
+// Debug flag for MIDI event logging (disable for better performance)
+static const bool DEBUG_MIDI_EVENTS = false;
 
 // MIDI file player callback - sends note events to the appropriate synth
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
@@ -1082,7 +1096,18 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     // Get pad index from userdata to determine which program to use
     int pad_index = userdata ? *((int*)userdata) : -1;
 
-    std::cout << "MIDI file event: pad=" << pad_index << " note=" << note << " velocity=" << velocity << " on=" << on << std::endl;
+    // Trigger visual feedback on note ON events
+    if (on && pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
+        note_pad_fade[pad_index] = 1.0f;  // Trigger white/bright blink on each note
+    }
+
+    // Optional: Log event timing for debugging sync issues (causes I/O blocking!)
+    if (DEBUG_MIDI_EVENTS) {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "[" << ms << "] NOTE pad=" << (pad_index + 1)
+                  << " note=" << note << " vel=" << velocity << " " << (on ? "ON" : "OFF") << std::endl;
+    }
 
     // Determine target program based on pad configuration
     int target_program = current_program;
@@ -1093,20 +1118,14 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
         }
     }
 
-    std::cout << "  Using program " << target_program << std::endl;
-
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];
     if (target_synth) {
         if (on) {
-            std::cout << "  Sending note_on to synth" << std::endl;
             sfizz_send_note_on(target_synth, 0, note, velocity);
         } else {
-            std::cout << "  Sending note_off to synth" << std::endl;
             sfizz_send_note_off(target_synth, 0, note, 0);
         }
-    } else {
-        std::cout << "  ERROR: No target synth for program " << target_program << "!" << std::endl;
     }
 }
 
@@ -1631,30 +1650,22 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        // Update MIDI file players (delta time ~16.67ms at 60fps)
-        if (midi_pad_player) {
-            // Pass current beat for quantization (-1 if no MIDI clock)
-            int current_beat = midi_clock.active ? midi_clock.beat_count : -1;
-            midi_file_pad_player_update_all(midi_pad_player, 16.67f, current_beat);
-        }
+        // MIDI file players are now updated in the audio callback for sample-accurate timing!
+        // This eliminates UI thread blocking and ensures perfect sync between pads.
+        // (Previously called midi_file_pad_player_update_all here in UI thread)
 
         // Update note pad fade effects
         for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
-            // Check if this pad has a MIDI file playing
-            bool is_midi_playing = (midi_pad_player && midi_file_pad_player_is_playing(midi_pad_player, i));
-
-            if (is_midi_playing) {
-                // Keep pad highlighted while playing, but allow blink to fade from >1.0 back to 1.0
-                if (note_pad_fade[i] > 1.0f) {
-                    note_pad_fade[i] -= 0.05f;  // Fast fade from blink
-                    if (note_pad_fade[i] < 1.0f) note_pad_fade[i] = 1.0f;
-                } else {
-                    note_pad_fade[i] = 1.0f;  // Keep at full brightness while playing
-                }
-            } else if (note_pad_fade[i] > 0.0f) {
-                // Normal fade when not playing
-                note_pad_fade[i] -= 0.02f;
+            // Fade the normal note trigger brightness (fast fade on each note)
+            if (note_pad_fade[i] > 0.0f) {
+                note_pad_fade[i] -= 0.04f;  // Fast fade on each note trigger
                 if (note_pad_fade[i] < 0.0f) note_pad_fade[i] = 0.0f;
+            }
+
+            // Fade the loop restart brightness (slower for more visibility)
+            if (note_pad_loop_fade[i] > 0.0f) {
+                note_pad_loop_fade[i] -= 0.02f;  // Slower fade for loop events
+                if (note_pad_loop_fade[i] < 0.0f) note_pad_loop_fade[i] = 0.0f;
             }
         }
 
@@ -3382,15 +3393,27 @@ int main(int argc, char* argv[]) {
                         NoteTriggerPad* pad = (rsx && pad_idx < rsx->num_pads) ? &rsx->pads[pad_idx] : nullptr;
                         bool pad_configured = (pad && pad->enabled && (pad->note >= 0 || pad->midi_file[0] != '\0'));
 
-                        // Pad button with fade effect
-                        float fade = note_pad_fade[pad_idx];
+                        // Pad button with fade effect (inspired by regroove visual feedback)
+                        float note_brightness = note_pad_fade[pad_idx];        // White/bright on note triggers
+                        float loop_brightness = note_pad_loop_fade[pad_idx];    // Blue/cyan on loop restarts
                         ImVec4 pad_col;
-                        if (fade > 0.0f) {
-                            // Active (red with fade)
-                            pad_col = ImVec4(0.90f * fade + 0.26f * (1.0f - fade),
-                                           0.15f * fade + 0.27f * (1.0f - fade),
-                                           0.18f * fade + 0.30f * (1.0f - fade),
-                                           1.0f);
+
+                        if (loop_brightness > 0.0f) {
+                            // Loop restart - blue/cyan blink (like regroove transition fade)
+                            pad_col = ImVec4(
+                                0.26f + loop_brightness * 0.15f,
+                                0.27f + loop_brightness * 0.45f,  // More green for cyan
+                                0.30f + loop_brightness * 0.60f,  // Strong blue
+                                1.0f
+                            );
+                        } else if (note_brightness > 0.0f) {
+                            // Note trigger - white/bright blink (like regroove trigger fade)
+                            pad_col = ImVec4(
+                                0.26f + note_brightness * 0.64f,  // Add white
+                                0.27f + note_brightness * 0.63f,
+                                0.30f + note_brightness * 0.60f,
+                                1.0f
+                            );
                         } else if (!pad_configured) {
                             // Not configured (darker gray)
                             pad_col = ImVec4(0.16f, 0.17f, 0.18f, 1.0f);
