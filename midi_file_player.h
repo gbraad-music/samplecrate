@@ -78,6 +78,11 @@ void midi_file_player_seek(MidiFilePlayer* player, float seconds);
 // Get total duration in seconds
 float midi_file_player_get_duration(MidiFilePlayer* player);
 
+// Sync the player's start_beat reference to current MIDI clock pulse
+// Call this when SPP (Song Position Pointer) changes the absolute pulse count
+// to prevent the player from calculating incorrect elapsed time
+void midi_file_player_sync_start_beat(MidiFilePlayer* player, int current_pulse);
+
 #ifdef __cplusplus
 }
 #endif

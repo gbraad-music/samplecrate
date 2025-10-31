@@ -45,6 +45,7 @@ void samplecrate_config_init(SamplecrateConfig* config) {
     // MIDI sync defaults
     config->midi_clock_tempo_sync = 1;  // Enabled by default (adjust tempo to MIDI clock)
     config->midi_spp_receive = 1;       // Enabled by default (sync to SPP)
+    config->midi_quantize_beats = 4;    // Default to 4 beats (1 bar) quantization
 
     // Mixer defaults
     config->default_master_volume = 0.7f;
@@ -145,6 +146,7 @@ int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
             else if (strcmp(key, "midi_program_change_enabled_device_2") == 0) config->midi_program_change_enabled[2] = atoi(value);
             else if (strcmp(key, "midi_clock_tempo_sync") == 0) config->midi_clock_tempo_sync = atoi(value);
             else if (strcmp(key, "midi_spp_receive") == 0) config->midi_spp_receive = atoi(value);
+            else if (strcmp(key, "midi_quantize_beats") == 0) config->midi_quantize_beats = atoi(value);
             // Legacy support for old config files
             else if (strcmp(key, "midi_program_change_enabled") == 0) {
                 int val = atoi(value);
@@ -210,6 +212,8 @@ int samplecrate_config_save(const SamplecrateConfig* config, const char* filepat
     fprintf(f, "midi_program_change_enabled_device_2=%d\n", config->midi_program_change_enabled[2]);
     fprintf(f, "midi_clock_tempo_sync=%d  ; 0 = visual only, 1 = adjust playback tempo\n", config->midi_clock_tempo_sync);
     fprintf(f, "midi_spp_receive=%d  ; 0 = ignore SPP, 1 = sync to SPP\n", config->midi_spp_receive);
+    fprintf(f, "midi_quantize_beats=%d  ; Quantize triggers: 1, 2, 4, or 8 beats\n", config->midi_quantize_beats);
+    fprintf(f, "midi_quantize_beats=%d  ; Quantize triggers: 1, 2, 4, or 8 beats\n", config->midi_quantize_beats);
     fprintf(f, "\n");
 
     fprintf(f, "[Mixer]\n");

@@ -147,20 +147,25 @@ void midi_file_player_play(MidiFilePlayer* player) {
 int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, int quantize_beats) {
     if (!player) return -1;
 
-    // Calculate the next quantized beat
-    int next_beat = ((current_beat / quantize_beats) + 1) * quantize_beats;
+    // NOTE: current_beat is actually in PULSES (24 ppqn), not beats
+    // Convert quantize_beats to pulses: 1 beat = 24 pulses
+    int quantize_pulses = quantize_beats * 24;
 
-    // std::cout << "midi_file_player_play_quantized: Scheduling playback for beat " << next_beat
-    //           << " (current=" << current_beat << ", quantize=" << quantize_beats << ")" << std::endl;
+    // Calculate the next quantized pulse boundary
+    int next_pulse = ((current_beat / quantize_pulses) + 1) * quantize_pulses;
+
+    std::cout << "QUANTIZE: Scheduling playback for pulse " << next_pulse
+              << " (current=" << current_beat << ", quantize=" << quantize_beats
+              << " beats = " << quantize_pulses << " pulses)" << std::endl;
 
     player->playing = false;  // Not playing yet
     player->scheduled = true;
-    player->scheduled_start_beat = next_beat;
+    player->scheduled_start_beat = next_pulse;
     player->position_seconds = 0.0f;
     player->last_tick_processed = -1;  // Reset tick tracking
     player->active_notes.clear();
 
-    return next_beat;
+    return next_pulse;
 }
 
 // Stop playback
@@ -238,18 +243,23 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // Check if we're scheduled to start and the beat has arrived
     if (player->scheduled && current_beat >= 0) {
         if (current_beat >= player->scheduled_start_beat) {
-            // std::cout << "midi_file_player_update: Starting scheduled playback on pulse " << current_beat
-            //           << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
+            std::cout << "QUANTIZE: Starting scheduled playback NOW on pulse " << current_beat
+                      << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
             player->scheduled = false;
             player->scheduled_start_beat = -1;
             player->playing = true;
             player->start_beat = current_beat;
             player->position_seconds = 0.0f;
 
-            // std::cout << "  Initial state: start_beat=" << player->start_beat
-            //           << " position=" << player->position_seconds << "s" << std::endl;
+            std::cout << "  Initial state: start_beat=" << player->start_beat
+                      << " position=" << player->position_seconds << "s" << std::endl;
         } else {
             // Still waiting for the scheduled beat
+            static int wait_count = 0;
+            if (wait_count++ % 1000 == 0) {  // Print every 1000 frames to avoid spam
+                std::cout << "QUANTIZE: WAITING... current=" << current_beat
+                          << " scheduled=" << player->scheduled_start_beat << std::endl;
+            }
             return;
         }
     }
@@ -492,4 +502,22 @@ void midi_file_player_seek(MidiFilePlayer* player, float seconds) {
 float midi_file_player_get_duration(MidiFilePlayer* player) {
     if (!player) return 0.0f;
     return player->duration_seconds;
+}
+
+// Sync the player's start_beat reference to current MIDI clock pulse
+void midi_file_player_sync_start_beat(MidiFilePlayer* player, int current_pulse) {
+    if (!player) return;
+
+    // Only sync if the player is actually playing and using MIDI clock
+    if (!player->playing || player->start_beat < 0) return;
+
+    // Update start_beat to maintain current playback position
+    // Formula: new_start = current_pulse - (current_position_in_pulses)
+    // current_position_in_pulses = position_seconds * bpm * 24 / 60
+    int current_position_pulses = (int)(player->position_seconds * player->tempo_bpm * 24.0f / 60.0f);
+    player->start_beat = current_pulse - current_position_pulses;
+
+    // Reset last_tick_processed to avoid duplicate events after sync
+    int current_tick = (int)(player->position_seconds * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
+    player->last_tick_processed = current_tick;
 }

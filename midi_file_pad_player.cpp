@@ -205,3 +205,27 @@ int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index
 
     return midi_file_player_is_playing(player);
 }
+
+// Sync a specific pad's timing reference to current MIDI clock pulse
+void midi_file_pad_player_sync_pad(MidiFilePadPlayer* pad_player, int pad_index, int current_pulse) {
+    if (!pad_player || pad_index < 0 || pad_index >= MAX_PAD_PLAYERS) return;
+
+    MidiFilePlayer* player = pad_player->players[pad_index];
+    if (!player) return;
+
+    // Only sync if the player is actually playing
+    if (midi_file_player_is_playing(player)) {
+        midi_file_player_sync_start_beat(player, current_pulse);
+    }
+}
+
+// Sync all playing pads to current MIDI clock pulse
+void midi_file_pad_player_sync_all(MidiFilePadPlayer* pad_player, int current_pulse) {
+    if (!pad_player) return;
+
+    for (int i = 0; i < MAX_PAD_PLAYERS; i++) {
+        if (pad_player->players[i] && midi_file_player_is_playing(pad_player->players[i])) {
+            midi_file_player_sync_start_beat(pad_player->players[i], current_pulse);
+        }
+    }
+}

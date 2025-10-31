@@ -65,6 +65,15 @@ void midi_file_pad_player_update_all_samples(MidiFilePadPlayer* pad_player, int 
 // Check if a specific pad is playing
 int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index);
 
+// Sync a specific pad's timing reference to current MIDI clock pulse
+// Call this when SPP arrives to adjust timing without resetting playback position
+// This prevents drift while maintaining continuous playback
+void midi_file_pad_player_sync_pad(MidiFilePadPlayer* pad_player, int pad_index, int current_pulse);
+
+// Sync all playing pads to current MIDI clock pulse
+// Convenience function to sync all active pads at once (e.g., when SPP arrives)
+void midi_file_pad_player_sync_all(MidiFilePadPlayer* pad_player, int current_pulse);
+
 #ifdef __cplusplus
 }
 #endif

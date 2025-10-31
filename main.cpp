@@ -79,7 +79,7 @@ MidiFilePadPlayer* midi_pad_player = nullptr;
 int midi_pad_indices[RSX_MAX_NOTE_PADS];
 
 // MIDI sync/quantization settings
-int midi_quantize_beats = 1;  // Quantize to this many beats (1=quarter, 2=half, 4=bar)
+int midi_quantize_beats = 4;  // Quantize to this many beats (1=quarter, 2=half, 4=bar, 8=2 bars) - loaded from config
 
 // Tempo control (for MIDI file playback)
 float tempo_bpm = 125.0f;  // Manual tempo slider value
@@ -809,15 +809,43 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         // Only sync position if SPP receive is enabled
         if (config.midi_spp_receive == 1) {
             midi_clock.spp_synced = true;
+            midi_clock.active = true;  // SPP implies MIDI clock is active
+            midi_clock.running = true; // SPP implies transport is running
 
-            // Convert SPP (16th notes) to quarter note beats
-            // SPP counts 16th notes, so divide by 4 to get quarter notes
-            // But also account for the fact that we might be mid-pattern
-            // For now, just sync to the SPP position directly
-            midi_clock.beat_count = spp_position / 4;  // Convert 16th notes to quarter notes
+            // NOTE: SPP is a beat marker for alignment of PLAYING PADS ONLY.
+            // DO NOT adjust total_pulse_count based on SPP - it causes tempo jumps.
+            // SPP position may wrap around and doesn't represent our local timeline.
 
-            std::cout << "MIDI SPP received: position=" << spp_position
-                      << " (16th notes), beat=" << midi_clock.beat_count << std::endl;
+            // Extract beat info from SPP (for display only)
+            int beat_number = spp_position / 4;  // Convert 16th notes to quarter notes
+            int pulse_from_spp = spp_position * 6;  // Each 16th note = 6 MIDI clock pulses
+
+            std::cout << "MIDI SPP received: position=" << spp_position << " (16th notes), beat="
+                      << beat_number << ", spp_pulse=" << pulse_from_spp
+                      << " | Local pulse=" << midi_clock.total_pulse_count
+                      << std::endl;
+
+            // SPP does NOT affect local pulse count - that continues running based on clock/internal timing
+            // SPP only syncs the timing of already-playing pads
+
+            // Sync all playing pads to current local pulse count (NOT the SPP position)
+            // This adjusts their timing reference to align with this beat boundary marker
+            if (midi_pad_player) {
+                int num_synced = 0;
+                for (int i = 0; i < 32; i++) {
+                    if (midi_file_pad_player_is_playing(midi_pad_player, i)) {
+                        num_synced++;
+                    }
+                }
+                if (num_synced > 0) {
+                    // Sync to our local pulse count - SPP tells us "you should be on a beat NOW"
+                    midi_file_pad_player_sync_all(midi_pad_player, midi_clock.total_pulse_count);
+                    std::cout << "  Synced " << num_synced << " playing pad(s) to beat boundary (local pulse="
+                              << midi_clock.total_pulse_count << ")" << std::endl;
+                } else {
+                    std::cout << "  No playing pads - ready for quantized trigger on next start" << std::endl;
+                }
+            }
         } else {
             std::cout << "MIDI SPP received but IGNORED (disabled in settings): position="
                       << spp_position << std::endl;
@@ -1037,9 +1065,41 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         //     logged_clock_state = true;
         // }
 
-        // Always use internal time (-1) for playback - MIDI clock only adjusts tempo, doesn't control time
-        // This ensures playback continues even when MIDI clock pulses stop
-        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, -1);
+        // Pass MIDI clock pulse count if active, otherwise -1
+        // This enables quantized triggering to wait for beat boundaries
+        // If MIDI clock/SPP is active but clock pulses stopped, use internal timing
+        int current_pulse = -1;
+        if (midi_clock.active && midi_clock.running) {
+            // Check if MIDI clock pulses have stopped (no pulse in last 100ms)
+            static uint64_t last_internal_update = 0;
+            uint64_t now = get_microseconds();
+            bool clock_stopped = (midi_clock.last_clock_time > 0) && 
+                                ((now - midi_clock.last_clock_time) > 100000); // 100ms threshold
+
+            if (clock_stopped && active_bpm > 0) {
+                // MIDI clock stopped - use internal timing to keep pulse count advancing
+                // Calculate how many pulses should have elapsed based on time and BPM
+                if (last_internal_update == 0) {
+                    last_internal_update = now;
+                }
+                
+                uint64_t time_delta = now - last_internal_update;
+                // Pulses per microsecond = (BPM * 24) / 60000000
+                float pulses_per_us = (active_bpm * 24.0f) / 60000000.0f;
+                int pulse_increment = (int)(time_delta * pulses_per_us);
+                
+                if (pulse_increment > 0) {
+                    midi_clock.total_pulse_count += pulse_increment;
+                    last_internal_update = now;
+                }
+            } else if (!clock_stopped) {
+                // Clock is running - reset internal timer
+                last_internal_update = 0;
+            }
+            
+            current_pulse = midi_clock.total_pulse_count;
+        }
+        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_pulse);
     }
 
     std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1365,6 +1425,12 @@ int main(int argc, char* argv[]) {
 
     // Load expanded pads setting from config
     expanded_pads = (config.expanded_pads != 0);
+
+    // Load MIDI quantize setting from config
+    midi_quantize_beats = config.midi_quantize_beats;
+
+    // Load MIDI quantize setting from config
+    midi_quantize_beats = config.midi_quantize_beats;
 
     // Apply config defaults to mixer
     mixer.master_volume = config.default_master_volume;
@@ -3718,13 +3784,28 @@ int main(int argc, char* argv[]) {
                                     note_pad_fade[pad_idx] = 0.0f;
                                 } else {
                                     // Not playing - start/retrigger MIDI file playback
-                                    // std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                    std::cout << "=== TRIGGERING PAD " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                    std::cout << "  midi_clock.active=" << midi_clock.active << std::endl;
+                                    std::cout << "  midi_clock.running=" << midi_clock.running << std::endl;
+                                    std::cout << "  midi_clock.total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
 
-                                    // Always use immediate trigger - the player has its own internal quantization
-                                    // based on its current tempo. This ensures triggering works even when
-                                    // MIDI clock pulses stop.
-                                    midi_file_pad_player_trigger(midi_pad_player, pad_idx);
-                                    note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
+                                    // Use quantized trigger if MIDI clock is active, otherwise trigger immediately
+                                    // Quantization ensures the pad starts on a beat boundary aligned with SPP
+                                    if (midi_clock.active && midi_clock.running) {
+                                        // MIDI clock active - use quantized trigger for beat-aligned playback
+                                        std::cout << "  MIDI Clock active: using quantized trigger" << std::endl;
+                                        std::cout << "  Current pulse: " << midi_clock.total_pulse_count << std::endl;
+                                        std::cout << "  Quantize beats: " << midi_quantize_beats << std::endl;
+                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx,
+                                                                               midi_clock.total_pulse_count,
+                                                                               midi_quantize_beats);
+                                        note_pad_fade[pad_idx] = 0.5f;  // Dim blink to show it's scheduled
+                                    } else {
+                                        // No MIDI clock - trigger immediately
+                                        std::cout << "  No MIDI clock: triggering immediately" << std::endl;
+                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                        note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
+                                    }
                                 }
 
                                 // Mark as held to prevent retriggering while mouse is down (MIDI file pads only)
@@ -4189,6 +4270,8 @@ int main(int argc, char* argv[]) {
                         case 2: midi_quantize_beats = 4; break;
                         case 3: midi_quantize_beats = 8; break;
                     }
+                    config.midi_quantize_beats = midi_quantize_beats;
+                    samplecrate_config_save(&config, "samplecrate.ini");
                 }
 
                 ImGui::Spacing();
