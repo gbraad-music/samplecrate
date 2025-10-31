@@ -100,9 +100,12 @@ struct {
     bool running = false;          // Transport running (start/continue)
     float bpm = 0.0f;             // Calculated BPM
     uint64_t last_clock_time = 0; // Last clock pulse timestamp (microseconds)
-    int pulse_count = 0;          // Pulses since last calculation (0-23)
+    int pulse_count = 0;          // Pulses since last beat (0-23)
     int beat_count = 0;           // Total quarter note beats since start
+    int total_pulse_count = 0;    // Total pulses since start (for sub-beat precision: 24 ppqn)
     uint64_t last_bpm_calc_time = 0; // Last BPM calculation time
+    int spp_position = 0;         // Song Position Pointer (in 16th notes / MIDI beats)
+    bool spp_synced = false;      // True if we've received SPP and synced to it
 } midi_clock;
 
 // Error message for LCD display
@@ -724,12 +727,26 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     int msg_type = status & 0xF0;
     int channel = status & 0x0F;
 
+    // Debug: Log only important real-time MIDI messages (start, stop, continue)
+    // Clock (0xF8) is too spammy - it fires 24 times per beat!
+    if (status >= 0xF8 && status != 0xF8) {
+        std::cout << "[MIDI RT] Received: 0x" << std::hex << (int)status << std::dec;
+        if (status == 0xFA) std::cout << " (Start)";
+        else if (status == 0xFC) std::cout << " (Stop)";
+        else if (status == 0xFB) std::cout << " (Continue)";
+        else if (status == 0xF2) std::cout << " (SPP)";
+        std::cout << std::endl;
+    }
+
     // Handle MIDI Clock messages (Real-Time messages - these don't have channels)
     if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
         uint64_t now = get_microseconds();
 
         if (midi_clock.last_clock_time > 0) {
             uint64_t interval = now - midi_clock.last_clock_time;
+
+            // Increment total pulse count for sub-beat precision
+            midi_clock.total_pulse_count++;
 
             // Calculate BPM every 24 pulses (one quarter note)
             midi_clock.pulse_count++;
@@ -738,6 +755,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 // BPM = (60,000,000 microseconds/minute) / (time for one quarter note in microseconds)
                 if (total_time > 0) {
                     midi_clock.bpm = 60000000.0f / total_time;
+
+                    // Sync MIDI file player tempo to MIDI clock BPM
+                    if (midi_pad_player && midi_clock.bpm > 0.0f) {
+                        midi_file_pad_player_set_tempo(midi_pad_player, midi_clock.bpm);
+                    }
                 }
                 midi_clock.pulse_count = 0;
                 midi_clock.beat_count++;  // Increment beat counter
@@ -754,6 +776,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         midi_clock.running = true;
         midi_clock.pulse_count = 0;
         midi_clock.beat_count = 0;  // Reset beat counter on start
+        midi_clock.total_pulse_count = 0;  // Reset total pulse count for precise sync
         midi_clock.last_bpm_calc_time = get_microseconds();
         std::cout << "MIDI Start received" << std::endl;
         return;
@@ -764,6 +787,22 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     } else if (status == 0xFB) {  // MIDI Continue
         midi_clock.running = true;
         std::cout << "MIDI Continue received" << std::endl;
+        return;
+    } else if (status == 0xF2) {  // MIDI Song Position Pointer
+        // SPP format: 0xF2, LSB (7-bit), MSB (7-bit)
+        // Position is in "MIDI beats" (1/16th notes from start of song)
+        int spp_position = data1 | (data2 << 7);
+        midi_clock.spp_position = spp_position;
+        midi_clock.spp_synced = true;
+
+        // Convert SPP (16th notes) to quarter note beats
+        // SPP counts 16th notes, so divide by 4 to get quarter notes
+        // But also account for the fact that we might be mid-pattern
+        // For now, just sync to the SPP position directly
+        midi_clock.beat_count = spp_position / 4;  // Convert 16th notes to quarter notes
+
+        std::cout << "MIDI SPP received: position=" << spp_position
+                  << " (16th notes), beat=" << midi_clock.beat_count << std::endl;
         return;
     }
 
@@ -965,7 +1004,23 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     // This runs in the audio thread for perfect timing (no UI blocking!)
     // The MIDI event callbacks will acquire the lock themselves
     if (midi_pad_player) {
-        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, -1);
+        // Pass current pulse count for sub-beat precision MIDI clock sync
+        // total_pulse_count gives us 24 ppqn resolution instead of just beat resolution
+        // Convert to "beat number" by dividing: beat = total_pulses / 24
+        // (-1 if no MIDI clock)
+
+        // Debug MIDI clock state once
+        static bool logged_clock_state = false;
+        if (!logged_clock_state) {
+            std::cout << "=== SAMPLECRATE BUILD v2025-10-31_fix-wrap-duplicates ===" << std::endl;
+            std::cout << "AUDIO CALLBACK: midi_clock.active=" << midi_clock.active
+                      << " total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
+            logged_clock_state = true;
+        }
+
+        // Use MIDI clock sync if active (don't require 'running' since regroove doesn't send Start/Stop)
+        int current_beat = midi_clock.active ? midi_clock.total_pulse_count : -1;
+        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_beat);
     }
 
     std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1111,18 +1166,28 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
 
     // Determine target program based on pad configuration
     int target_program = current_program;
+    int pad_velocity = 100;  // Default velocity
     if (rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
         NoteTriggerPad* pad = &rsx->pads[pad_index];
         if (pad->program >= 0 && pad->program < rsx->num_programs) {
             target_program = pad->program;
         }
+        // Get pad's configured velocity
+        pad_velocity = pad->velocity > 0 ? pad->velocity : 100;
     }
+
+    // Scale MIDI file velocity by pad's configured velocity
+    // Formula: scaled_velocity = (midi_velocity * pad_velocity) / 100
+    // This allows pad velocity to act as a "playback volume" control (0-127)
+    int scaled_velocity = (velocity * pad_velocity) / 100;
+    if (scaled_velocity > 127) scaled_velocity = 127;  // Clamp to MIDI range
+    if (scaled_velocity < 0) scaled_velocity = 0;
 
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];
     if (target_synth) {
         if (on) {
-            sfizz_send_note_on(target_synth, 0, note, velocity);
+            sfizz_send_note_on(target_synth, 0, note, scaled_velocity);
         } else {
             sfizz_send_note_off(target_synth, 0, note, 0);
         }
@@ -3535,11 +3600,21 @@ int main(int argc, char* argv[]) {
                                     std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
 
                                     // Use quantized trigger if MIDI clock is active, otherwise immediate
-                                    if (midi_clock.active && midi_clock.running) {
-                                        // Use configured quantization
-                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx, midi_clock.beat_count, midi_quantize_beats);
+                                    // Note: We only check midi_clock.active (not running) because regroove doesn't send Start/Stop
+                                    if (midi_clock.active) {
+                                        // Quantize to quarter note boundaries
+                                        // MIDI clock sends 24 pulses per quarter note
+                                        // So we pass total_pulse_count (in pulses) and quantize to 24-pulse boundaries
+                                        int current_pulse = midi_clock.total_pulse_count;
+                                        int quantize_pulses = 24;  // 24 pulses = 1 quarter note
+
+                                        std::cout << "  Using MIDI clock quantization: current_pulse=" << current_pulse
+                                                  << " (quarter_note=" << (current_pulse / 24.0f)
+                                                  << ") quantize=24 pulses BPM=" << midi_clock.bpm << std::endl;
+                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx, current_pulse, quantize_pulses);
                                     } else {
-                                        // No MIDI clock - trigger immediately
+                                        // No MIDI clock - trigger immediately (NOT SYNCED!)
+                                        std::cout << "  WARNING: No MIDI clock - triggering immediately (will drift!)" << std::endl;
                                         midi_file_pad_player_trigger(midi_pad_player, pad_idx);
                                     }
                                     note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect

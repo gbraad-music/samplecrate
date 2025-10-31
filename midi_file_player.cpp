@@ -34,6 +34,7 @@ struct MidiFilePlayer {
     float position_seconds;    // Current playback position in seconds
     float duration_seconds;    // Total duration in seconds
     int ticks_per_quarter;     // MIDI ticks per quarter note (from file)
+    int last_tick_processed;   // Last tick that was processed (to prevent duplicates)
 
     // Track which notes are currently on (for all-notes-off when stopping)
     std::vector<int> active_notes;
@@ -55,6 +56,7 @@ MidiFilePlayer* midi_file_player_create(void) {
     player->position_seconds = 0.0f;
     player->duration_seconds = 0.0f;
     player->ticks_per_quarter = 480;  // Default TPQN
+    player->last_tick_processed = -1;  // No ticks processed yet
     return player;
 }
 
@@ -135,6 +137,7 @@ void midi_file_player_play(MidiFilePlayer* player) {
     player->scheduled_start_beat = -1;
     player->start_beat = -1;  // Will be set on first update
     player->position_seconds = 0.0f;
+    player->last_tick_processed = -1;  // Reset tick tracking
     player->active_notes.clear();
 }
 
@@ -152,6 +155,7 @@ int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, in
     player->scheduled = true;
     player->scheduled_start_beat = next_beat;
     player->position_seconds = 0.0f;
+    player->last_tick_processed = -1;  // Reset tick tracking
     player->active_notes.clear();
 
     return next_beat;
@@ -232,12 +236,16 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // Check if we're scheduled to start and the beat has arrived
     if (player->scheduled && current_beat >= 0) {
         if (current_beat >= player->scheduled_start_beat) {
-            std::cout << "midi_file_player_update: Starting scheduled playback on beat " << current_beat << std::endl;
+            std::cout << "midi_file_player_update: Starting scheduled playback on pulse " << current_beat
+                      << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
             player->scheduled = false;
             player->scheduled_start_beat = -1;
             player->playing = true;
             player->start_beat = current_beat;
             player->position_seconds = 0.0f;
+
+            std::cout << "  Initial state: start_beat=" << player->start_beat
+                      << " position=" << player->position_seconds << "s" << std::endl;
         } else {
             // Still waiting for the scheduled beat
             return;
@@ -251,14 +259,26 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
 
     // If MIDI clock is active (current_beat >= 0), use beat-based sync for perfect timing
     // Otherwise fall back to delta_ms
+    // Note: current_beat is actually total_pulse_count (24 pulses per quarter note)
+
+    // Debug: Log when we enter fallback mode on first frame
+    static bool logged_mode = false;
+    if (!logged_mode) {
+        std::cout << "MIDI FILE PLAYER: current_beat=" << current_beat
+                  << " (using " << (current_beat >= 0 ? "MIDI CLOCK SYNC" : "FALLBACK MODE") << ")" << std::endl;
+        logged_mode = true;
+    }
+
     if (current_beat >= 0) {
-        // First update: record start beat
+        // First update: record start pulse count
         if (player->start_beat < 0) {
             player->start_beat = current_beat;
         }
 
-        // Calculate position from beats elapsed since start
-        int beats_elapsed = current_beat - player->start_beat;
+        // Calculate position from pulses elapsed since start
+        // MIDI clock sends 24 pulses per quarter note (ppqn)
+        int pulses_elapsed = current_beat - player->start_beat;
+        float beats_elapsed = pulses_elapsed / 24.0f;  // Convert pulses to beats
         float seconds_per_beat = 60.0f / player->tempo_bpm;
         float new_position = beats_elapsed * seconds_per_beat;
 
@@ -282,8 +302,10 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
 
                 // Adjust start_beat to maintain sync across loops
                 // Each loop cycle represents duration_seconds worth of beats
+                // start_beat is in PULSES (not beats), so convert: beats * 24 = pulses
                 float beats_per_loop = player->duration_seconds / (60.0f / player->tempo_bpm);
-                player->start_beat += (int)(loop_cycles * beats_per_loop);
+                int pulses_per_loop = (int)(beats_per_loop * 24.0f);
+                player->start_beat += loop_cycles * pulses_per_loop;
 
                 // Note: We don't send note-offs here anymore - they'll be handled
                 // by the MIDI events themselves when we process the wrap range below
@@ -341,9 +363,12 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         }
     }
 
-    // Convert positions to ticks
-    int old_tick = (int)(old_position * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
+    // Convert current position to ticks
     int new_tick = (int)(player->position_seconds * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
+
+    // Use last_tick_processed to prevent duplicates across frame boundaries
+    // On first frame after playback starts, last_tick_processed will be -1
+    int old_tick = player->last_tick_processed;
 
     // Handle loop wrap: if position wrapped around, we need to fire events in two ranges:
     // 1. From old_tick to end of file
@@ -352,6 +377,10 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     bool did_wrap = did_wrap_in_fallback || ((old_position > player->position_seconds) && player->loop);
 
     if (did_wrap) {
+        // DON'T reset old_tick here - keep it from last_tick_processed so we only fire
+        // events from where we left off to the end, not the entire file!
+        // old_tick is already set to player->last_tick_processed above
+
         // Get the last tick in the file
         int last_tick = 0;
         if (!player->events.empty()) {
@@ -364,8 +393,11 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
                   << " last_tick=" << last_tick << " new_tick=" << new_tick << std::endl;
 
         // Fire events from old_tick to end of file
+        std::cout << "[WRAP PART 1] Firing events from " << old_tick << " to " << last_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick > old_tick && evt.tick <= last_tick) {
+                std::cout << "  [WRAP1] tick=" << evt.tick << " note=" << evt.note
+                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -381,8 +413,11 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         }
 
         // Fire events from beginning to new_tick (use >= to include tick 0)
+        std::cout << "[WRAP PART 2] Firing events from 0 to " << new_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick >= 0 && evt.tick <= new_tick) {
+                std::cout << "  [WRAP2] tick=" << evt.tick << " note=" << evt.note
+                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -396,10 +431,21 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
                 }
             }
         }
+        // Note: last_tick_processed will be updated to new_tick at the end of this function
     } else {
-        // Normal case: fire events between old_tick and new_tick (use >= to include events exactly at old_tick)
+        // Normal case: fire events between old_tick and new_tick
+        // Use > (not >=) for old_tick to avoid firing the same event twice across frame boundaries
         for (const MidiEventState& evt : player->events) {
-            if (evt.tick >= old_tick && evt.tick <= new_tick) {
+            if (evt.tick > old_tick && evt.tick <= new_tick) {
+                // Debug: Log every note event fired
+                auto now = std::chrono::high_resolution_clock::now();
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                std::cout << "[" << ms << "] FIRE_EVENT tick=" << evt.tick
+                          << " (range " << old_tick << "-" << new_tick << ")"
+                          << " note=" << evt.note << " vel=" << evt.velocity
+                          << " " << (evt.on ? "ON" : "OFF")
+                          << " pos=" << player->position_seconds << "s" << std::endl;
+
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -414,6 +460,10 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
             }
         }
     }
+
+    // Update last_tick_processed to the current position
+    // This ensures the next frame starts from where we left off (no duplicates!)
+    player->last_tick_processed = new_tick;
 }
 
 // Update playback with sample-accurate timing (call from audio callback)
