@@ -106,9 +106,14 @@ int midi_file_player_load(MidiFilePlayer* player, const char* filename) {
         }
     }
 
-    // Sort events by tick
+    // Sort events by tick, with NOTE OFFs before NOTE ONs at the same tick
+    // This prevents voice stealing issues when notes retrigger quickly
     std::sort(player->events.begin(), player->events.end(),
               [](const MidiEventState& a, const MidiEventState& b) {
+                  if (a.tick == b.tick) {
+                      // At same tick: OFF (0) before ON (1)
+                      return a.on < b.on;
+                  }
                   return a.tick < b.tick;
               });
 
@@ -128,9 +133,6 @@ int midi_file_player_load(MidiFilePlayer* player, const char* filename) {
 // Start playback
 void midi_file_player_play(MidiFilePlayer* player) {
     if (!player) return;
-
-    std::cout << "midi_file_player_play: Starting playback immediately, event_count=" << player->events.size()
-              << " duration=" << player->duration_seconds << "s" << std::endl;
 
     player->playing = true;
     player->scheduled = false;
@@ -291,12 +293,6 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
             player->position_seconds = fmod(new_position, player->duration_seconds);
 
             if (will_wrap) {
-                auto now = std::chrono::high_resolution_clock::now();
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                std::cout << "[" << ms << "] WRAP beat=" << current_beat
-                          << " pos=" << old_position << "->" << player->position_seconds
-                          << " dur=" << player->duration_seconds << std::endl;
-
                 // Calculate how many loop cycles have passed
                 int loop_cycles = (int)(new_position / player->duration_seconds);
 
@@ -325,17 +321,15 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
             return;
         }
     } else {
-        // No MIDI clock - use delta_ms (fallback mode)
-        player->position_seconds += delta_ms / 1000.0f;
+        // No MIDI clock - advance position by delta time
+        // This is sample-accurate when called from audio callback
+        float old_pos = player->position_seconds;
+        player->position_seconds += (delta_ms / 1000.0f);
+
 
         // Handle reaching the end
         if (player->position_seconds >= player->duration_seconds) {
             if (player->loop) {
-                auto now = std::chrono::high_resolution_clock::now();
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                std::cout << "[" << ms << "] WRAP (fallback) pos=" << old_position
-                          << "->" << player->position_seconds << " dur=" << player->duration_seconds << std::endl;
-
                 // Loop back to beginning - send all note-offs first for clean loop
                 if (player->callback) {
                     for (int note : player->active_notes) {
@@ -347,9 +341,8 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
                 // Mark that we handled the wrap here (so we don't process events twice below)
                 did_wrap_in_fallback = true;
 
-                // Reset position to the amount we overshot (for perfect timing)
-                // Example: if position=7.70 and duration=7.68, new position should be 0.02
-                player->position_seconds = player->position_seconds - player->duration_seconds;
+                // Wrap position using modulo to prevent drift accumulation
+                player->position_seconds = fmod(player->position_seconds, player->duration_seconds);
 
                 // Fire loop restart callback
                 if (player->loop_callback) {
@@ -438,15 +431,7 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         // Use > (not >=) for old_tick to avoid firing the same event twice across frame boundaries
         for (const MidiEventState& evt : player->events) {
             if (evt.tick > old_tick && evt.tick <= new_tick) {
-                // Debug: Log every note event fired
-                // auto now = std::chrono::high_resolution_clock::now();
-                // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                // std::cout << "[" << ms << "] FIRE_EVENT tick=" << evt.tick
-                //           << " (range " << old_tick << "-" << new_tick << ")"
-                //           << " note=" << evt.note << " vel=" << evt.velocity
-                //           << " " << (evt.on ? "ON" : "OFF")
-                //           << " pos=" << player->position_seconds << "s" << std::endl;
-
+                // Fire MIDI event
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -471,8 +456,10 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
 void midi_file_player_update_samples(MidiFilePlayer* player, int num_samples, int sample_rate, int current_beat) {
     if (!player || num_samples <= 0 || sample_rate <= 0) return;
 
-    // Convert samples to milliseconds
-    float delta_ms = (num_samples * 1000.0f) / sample_rate;
+    // Use EXACT sample count for perfect timing - no float conversion!
+    // Position advances by exactly num_samples every call
+    double delta_seconds = (double)num_samples / (double)sample_rate;
+    float delta_ms = delta_seconds * 1000.0;
 
     // Call the existing update function
     midi_file_player_update(player, delta_ms, current_beat);
