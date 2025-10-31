@@ -58,9 +58,10 @@ int midi_file_pad_player_load(MidiFilePadPlayer* pad_player, int pad_index, cons
         return -1;
     }
 
-    // Set callback with per-pad userdata and tempo
+    // Set callback with per-pad userdata, tempo, and loop mode
     midi_file_player_set_callback(player, pad_player->callback, userdata);
     midi_file_player_set_tempo(player, pad_player->tempo_bpm);
+    midi_file_player_set_loop(player, 1);  // Enable looping by default
 
     pad_player->players[pad_index] = player;
     return 0;
@@ -132,6 +133,18 @@ void midi_file_pad_player_set_tempo(MidiFilePadPlayer* pad_player, float bpm) {
     for (int i = 0; i < MAX_PAD_PLAYERS; i++) {
         if (pad_player->players[i]) {
             midi_file_player_set_tempo(pad_player->players[i], bpm);
+        }
+    }
+}
+
+// Set looping for all pad players
+void midi_file_pad_player_set_loop(MidiFilePadPlayer* pad_player, int loop) {
+    if (!pad_player) return;
+
+    // Update all existing players
+    for (int i = 0; i < MAX_PAD_PLAYERS; i++) {
+        if (pad_player->players[i]) {
+            midi_file_player_set_loop(pad_player->players[i], loop);
         }
     }
 }

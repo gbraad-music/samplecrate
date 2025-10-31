@@ -1623,7 +1623,19 @@ int main(int argc, char* argv[]) {
 
         // Update note pad fade effects
         for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
-            if (note_pad_fade[i] > 0.0f) {
+            // Check if this pad has a MIDI file playing
+            bool is_midi_playing = (midi_pad_player && midi_file_pad_player_is_playing(midi_pad_player, i));
+
+            if (is_midi_playing) {
+                // Keep pad highlighted while playing, but allow blink to fade from >1.0 back to 1.0
+                if (note_pad_fade[i] > 1.0f) {
+                    note_pad_fade[i] -= 0.05f;  // Fast fade from blink
+                    if (note_pad_fade[i] < 1.0f) note_pad_fade[i] = 1.0f;
+                } else {
+                    note_pad_fade[i] = 1.0f;  // Keep at full brightness while playing
+                }
+            } else if (note_pad_fade[i] > 0.0f) {
+                // Normal fade when not playing
                 note_pad_fade[i] -= 0.02f;
                 if (note_pad_fade[i] < 0.0f) note_pad_fade[i] = 0.0f;
             }
@@ -3441,17 +3453,34 @@ int main(int argc, char* argv[]) {
 
                         bool is_active = ImGui::IsItemActive();
                         bool was_held = (held_pad_index == pad_idx);
+                        bool just_clicked = ImGui::IsItemClicked();
 
-                        if (is_active && !was_held && pad_configured && !learn_mode_active) {
+                        // For MIDI file pads, use click detection; for regular pads, use active state
+                        bool should_trigger = pad_configured && !learn_mode_active &&
+                                            ((pad->midi_file[0] != '\0' && just_clicked) ||
+                                             (pad->midi_file[0] == '\0' && is_active && !was_held));
+
+                        if (should_trigger) {
                             // Button just pressed
                             int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
                             // Check if pad has MIDI file configured
                             if (midi_pad_player && pad->midi_file[0] != '\0') {
-                                // Trigger MIDI file playback
-                                std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
-                                midi_file_pad_player_trigger(midi_pad_player, pad_idx);
-                                note_pad_fade[pad_idx] = 1.0f;
+                                // Check if already playing
+                                if (midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) {
+                                    // Already playing - stop it
+                                    std::cout << "=== STOPPING MIDI FILE for pad " << (pad_idx + 1) << " ===" << std::endl;
+                                    midi_file_pad_player_stop(midi_pad_player, pad_idx);
+                                    note_pad_fade[pad_idx] = 0.0f;
+                                } else {
+                                    // Not playing - start/retrigger MIDI file playback
+                                    std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                    midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                    note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
+                                }
+
+                                // Mark as held to prevent retriggering while mouse is down
+                                held_pad_index = pad_idx;
                             } else {
                                 // Regular single note trigger
                                 // Determine which synth to use based on pad's program setting

@@ -22,6 +22,7 @@ struct MidiFilePlayer {
     void* userdata;
 
     bool playing;
+    bool loop;                 // Loop playback
     float tempo_bpm;           // Current tempo in BPM
     float position_seconds;    // Current playback position in seconds
     float duration_seconds;    // Total duration in seconds
@@ -37,6 +38,7 @@ MidiFilePlayer* midi_file_player_create(void) {
     player->callback = nullptr;
     player->userdata = nullptr;
     player->playing = false;
+    player->loop = false;  // Default: no looping
     player->tempo_bpm = 125.0f;  // Default BPM is 125
     player->position_seconds = 0.0f;
     player->duration_seconds = 0.0f;
@@ -168,6 +170,18 @@ void midi_file_player_set_callback(MidiFilePlayer* player, MidiFileEventCallback
     player->userdata = userdata;
 }
 
+// Set looping mode
+void midi_file_player_set_loop(MidiFilePlayer* player, int loop) {
+    if (!player) return;
+    player->loop = (loop != 0);
+}
+
+// Get looping mode
+int midi_file_player_get_loop(MidiFilePlayer* player) {
+    if (!player) return 0;
+    return player->loop ? 1 : 0;
+}
+
 // Update playback
 void midi_file_player_update(MidiFilePlayer* player, float delta_ms) {
     if (!player || !player->playing || !player->callback) return;
@@ -175,10 +189,23 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms) {
     float old_position = player->position_seconds;
     player->position_seconds += delta_ms / 1000.0f;
 
-    // Stop if we reached the end
+    // Handle reaching the end
     if (player->position_seconds >= player->duration_seconds) {
-        midi_file_player_stop(player);
-        return;
+        if (player->loop) {
+            // Loop back to beginning - send all note-offs first for clean loop
+            if (player->callback) {
+                for (int note : player->active_notes) {
+                    player->callback(note, 0, 0, player->userdata);
+                }
+            }
+            player->active_notes.clear();
+            player->position_seconds = 0.0f;
+            old_position = 0.0f;
+        } else {
+            // Stop playback
+            midi_file_player_stop(player);
+            return;
+        }
     }
 
     // Convert positions to ticks

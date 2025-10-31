@@ -41,6 +41,9 @@ void midi_file_pad_player_set_callback(MidiFilePadPlayer* pad_player, MidiFileEv
 // Set tempo for all pad players
 void midi_file_pad_player_set_tempo(MidiFilePadPlayer* pad_player, float bpm);
 
+// Set looping for all pad players
+void midi_file_pad_player_set_loop(MidiFilePadPlayer* pad_player, int loop);
+
 // Update all active pad players (call from main loop)
 void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms);
 
