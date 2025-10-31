@@ -5,6 +5,8 @@ struct MidiFilePadPlayer {
     MidiFilePlayer* players[MAX_PAD_PLAYERS];
     MidiFileEventCallback callback;
     void* userdata;
+    MidiFileLoopCallback loop_callback;
+    void* loop_userdata;
     float tempo_bpm;
 };
 
@@ -18,6 +20,8 @@ MidiFilePadPlayer* midi_file_pad_player_create(void) {
 
     pad_player->callback = nullptr;
     pad_player->userdata = nullptr;
+    pad_player->loop_callback = nullptr;
+    pad_player->loop_userdata = nullptr;
     pad_player->tempo_bpm = 125.0f;  // Default BPM is 125
 
     return pad_player;
@@ -58,8 +62,9 @@ int midi_file_pad_player_load(MidiFilePadPlayer* pad_player, int pad_index, cons
         return -1;
     }
 
-    // Set callback with per-pad userdata, tempo, and loop mode
+    // Set callback with per-pad userdata, tempo, loop callback, and loop mode
     midi_file_player_set_callback(player, pad_player->callback, userdata);
+    midi_file_player_set_loop_callback(player, pad_player->loop_callback, userdata);  // Use same userdata for loop callback
     midi_file_player_set_tempo(player, pad_player->tempo_bpm);
     midi_file_player_set_loop(player, 1);  // Enable looping by default
 
@@ -77,13 +82,23 @@ void midi_file_pad_player_unload(MidiFilePadPlayer* pad_player, int pad_index) {
     }
 }
 
-// Trigger playback for a specific pad
+// Trigger playback for a specific pad (immediately, no quantization)
 void midi_file_pad_player_trigger(MidiFilePadPlayer* pad_player, int pad_index) {
     if (!pad_player || pad_index < 0 || pad_index >= MAX_PAD_PLAYERS) return;
 
     MidiFilePlayer* player = pad_player->players[pad_index];
     if (player) {
         midi_file_player_play(player);
+    }
+}
+
+// Trigger playback for a specific pad with quantization
+void midi_file_pad_player_trigger_quantized(MidiFilePadPlayer* pad_player, int pad_index, int current_beat, int quantize_beats) {
+    if (!pad_player || pad_index < 0 || pad_index >= MAX_PAD_PLAYERS) return;
+
+    MidiFilePlayer* player = pad_player->players[pad_index];
+    if (player) {
+        midi_file_player_play_quantized(player, current_beat, quantize_beats);
     }
 }
 
@@ -123,6 +138,16 @@ void midi_file_pad_player_set_callback(MidiFilePadPlayer* pad_player, MidiFileEv
     }
 }
 
+// Set the loop restart callback for all pad players
+void midi_file_pad_player_set_loop_callback(MidiFilePadPlayer* pad_player, MidiFileLoopCallback callback, void* userdata) {
+    if (!pad_player) return;
+
+    pad_player->loop_callback = callback;
+    pad_player->loop_userdata = userdata;
+
+    // No need to update existing players - they get it when loaded
+}
+
 // Set tempo for all pad players
 void midi_file_pad_player_set_tempo(MidiFilePadPlayer* pad_player, float bpm) {
     if (!pad_player || bpm <= 0.0f) return;
@@ -150,12 +175,12 @@ void midi_file_pad_player_set_loop(MidiFilePadPlayer* pad_player, int loop) {
 }
 
 // Update all active pad players
-void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms) {
+void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms, int current_beat) {
     if (!pad_player) return;
 
     for (int i = 0; i < MAX_PAD_PLAYERS; i++) {
         if (pad_player->players[i]) {
-            midi_file_player_update(pad_player->players[i], delta_ms);
+            midi_file_player_update(pad_player->players[i], delta_ms, current_beat);
         }
     }
 }

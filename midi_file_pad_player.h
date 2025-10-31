@@ -26,8 +26,13 @@ int midi_file_pad_player_load(MidiFilePadPlayer* pad_player, int pad_index, cons
 // Unload MIDI file for a specific pad
 void midi_file_pad_player_unload(MidiFilePadPlayer* pad_player, int pad_index);
 
-// Trigger playback for a specific pad
+// Trigger playback for a specific pad (immediately, no quantization)
 void midi_file_pad_player_trigger(MidiFilePadPlayer* pad_player, int pad_index);
+
+// Trigger playback for a specific pad with quantization
+// current_beat: current MIDI clock beat number
+// quantize_beats: quantize to this many beats (e.g., 1=quarter note, 4=one bar)
+void midi_file_pad_player_trigger_quantized(MidiFilePadPlayer* pad_player, int pad_index, int current_beat, int quantize_beats);
 
 // Stop playback for a specific pad
 void midi_file_pad_player_stop(MidiFilePadPlayer* pad_player, int pad_index);
@@ -38,6 +43,9 @@ void midi_file_pad_player_stop_all(MidiFilePadPlayer* pad_player);
 // Set the MIDI event callback for all pad players
 void midi_file_pad_player_set_callback(MidiFilePadPlayer* pad_player, MidiFileEventCallback callback, void* userdata);
 
+// Set the loop restart callback for all pad players
+void midi_file_pad_player_set_loop_callback(MidiFilePadPlayer* pad_player, MidiFileLoopCallback callback, void* userdata);
+
 // Set tempo for all pad players
 void midi_file_pad_player_set_tempo(MidiFilePadPlayer* pad_player, float bpm);
 
@@ -45,7 +53,8 @@ void midi_file_pad_player_set_tempo(MidiFilePadPlayer* pad_player, float bpm);
 void midi_file_pad_player_set_loop(MidiFilePadPlayer* pad_player, int loop);
 
 // Update all active pad players (call from main loop)
-void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms);
+// current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
+void midi_file_pad_player_update_all(MidiFilePadPlayer* pad_player, float delta_ms, int current_beat);
 
 // Check if a specific pad is playing
 int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index);

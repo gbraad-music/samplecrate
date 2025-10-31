@@ -12,6 +12,10 @@ typedef struct MidiFilePlayer MidiFilePlayer;
 // Parameters: note, velocity, on (1=note_on, 0=note_off), userdata
 typedef void (*MidiFileEventCallback)(int note, int velocity, int on, void* userdata);
 
+// Callback type for loop restart events
+// Parameters: userdata
+typedef void (*MidiFileLoopCallback)(void* userdata);
+
 // Create a new MIDI file player
 MidiFilePlayer* midi_file_player_create(void);
 
@@ -24,6 +28,11 @@ int midi_file_player_load(MidiFilePlayer* player, const char* filename);
 
 // Start playback (resets to beginning)
 void midi_file_player_play(MidiFilePlayer* player);
+
+// Schedule playback to start on a specific beat (for quantization)
+// current_beat: the current beat number
+// Returns the beat number when playback will actually start
+int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, int quantize_beats);
 
 // Stop playback
 void midi_file_player_stop(MidiFilePlayer* player);
@@ -40,6 +49,9 @@ float midi_file_player_get_tempo(MidiFilePlayer* player);
 // Set the MIDI event callback
 void midi_file_player_set_callback(MidiFilePlayer* player, MidiFileEventCallback callback, void* userdata);
 
+// Set the loop restart callback (called when loop restarts)
+void midi_file_player_set_loop_callback(MidiFilePlayer* player, MidiFileLoopCallback callback, void* userdata);
+
 // Set looping mode (default: off)
 void midi_file_player_set_loop(MidiFilePlayer* player, int loop);
 
@@ -48,7 +60,8 @@ int midi_file_player_get_loop(MidiFilePlayer* player);
 
 // Update playback (call regularly from main loop)
 // delta_ms: time elapsed since last update in milliseconds
-void midi_file_player_update(MidiFilePlayer* player, float delta_ms);
+// current_beat: current MIDI clock beat number (for quantization, -1 if no MIDI clock)
+void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current_beat);
 
 // Get current playback position in seconds
 float midi_file_player_get_position(MidiFilePlayer* player);

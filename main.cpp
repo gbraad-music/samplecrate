@@ -78,6 +78,9 @@ MidiFilePadPlayer* midi_pad_player = nullptr;
 // Pad index storage for MIDI file callbacks (so each pad knows which program to use)
 int midi_pad_indices[RSX_MAX_NOTE_PADS];
 
+// MIDI sync/quantization settings
+int midi_quantize_beats = 1;  // Quantize to this many beats (1=quarter, 2=half, 4=bar)
+
 // Note pad visual feedback
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
 
@@ -96,7 +99,8 @@ struct {
     bool running = false;          // Transport running (start/continue)
     float bpm = 0.0f;             // Calculated BPM
     uint64_t last_clock_time = 0; // Last clock pulse timestamp (microseconds)
-    int pulse_count = 0;          // Pulses since last calculation
+    int pulse_count = 0;          // Pulses since last calculation (0-23)
+    int beat_count = 0;           // Total quarter note beats since start
     uint64_t last_bpm_calc_time = 0; // Last BPM calculation time
 } midi_clock;
 
@@ -735,6 +739,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                     midi_clock.bpm = 60000000.0f / total_time;
                 }
                 midi_clock.pulse_count = 0;
+                midi_clock.beat_count++;  // Increment beat counter
                 midi_clock.last_bpm_calc_time = now;
             }
         } else {
@@ -747,6 +752,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     } else if (status == 0xFA) {  // MIDI Start
         midi_clock.running = true;
         midi_clock.pulse_count = 0;
+        midi_clock.beat_count = 0;  // Reset beat counter on start
         midi_clock.last_bpm_calc_time = get_microseconds();
         std::cout << "MIDI Start received" << std::endl;
         return;
@@ -1061,6 +1067,14 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     }
 }
 
+// MIDI file loop restart callback - triggers visual blink
+void midi_file_loop_callback(void* userdata) {
+    int pad_index = userdata ? *((int*)userdata) : -1;
+    if (pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
+        note_pad_fade[pad_index] = 1.5f;  // Trigger blink on loop restart
+    }
+}
+
 // MIDI file player callback - sends note events to the appropriate synth
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1308,6 +1322,7 @@ int main(int argc, char* argv[]) {
     midi_pad_player = midi_file_pad_player_create();
     if (midi_pad_player) {
         midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
+        midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
         midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
     }
 
@@ -1618,7 +1633,9 @@ int main(int argc, char* argv[]) {
 
         // Update MIDI file players (delta time ~16.67ms at 60fps)
         if (midi_pad_player) {
-            midi_file_pad_player_update_all(midi_pad_player, 16.67f);
+            // Pass current beat for quantization (-1 if no MIDI clock)
+            int current_beat = midi_clock.active ? midi_clock.beat_count : -1;
+            midi_file_pad_player_update_all(midi_pad_player, 16.67f, current_beat);
         }
 
         // Update note pad fade effects
@@ -2286,7 +2303,8 @@ int main(int argc, char* argv[]) {
                             if (col > 0) ImGui::SameLine();
 
                             bool is_selected = (selected_pad == pad_idx);
-                            bool is_configured = (rsx->pads[pad_idx].note >= 0);
+                            bool is_configured = (rsx->pads[pad_idx].enabled &&
+                                                 (rsx->pads[pad_idx].note >= 0 || rsx->pads[pad_idx].midi_file[0] != '\0'));
 
                             ImVec4 btn_col = is_selected ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) :
                                             (is_configured ? ImVec4(0.26f, 0.27f, 0.30f, 1.0f) :
@@ -2380,10 +2398,11 @@ int main(int argc, char* argv[]) {
                     ImGui::Text("MIDI File Playback (optional):");
                     ImGui::TextWrapped("Leave empty to trigger a single note. Set a MIDI file path to play that file when pad is triggered.");
 
-                    if (ImGui::InputText("MIDI File Path", pad->midi_file, sizeof(pad->midi_file))) {
+                    // Use InputText with EnterReturnsTrue flag to only load on Enter or focus lost
+                    if (ImGui::InputText("MIDI File Path", pad->midi_file, sizeof(pad->midi_file), ImGuiInputTextFlags_EnterReturnsTrue)) {
                         rsx_changed = true;
 
-                        // Load MIDI file immediately when path is changed
+                        // Load MIDI file only when Enter is pressed or focus is lost
                         if (midi_pad_player && pad->midi_file[0] != '\0') {
                             // Enable the pad when MIDI file is set
                             if (!pad->enabled) {
@@ -2392,6 +2411,22 @@ int main(int argc, char* argv[]) {
                             }
 
                             // Get full path relative to RSX file
+                            char midi_path[512];
+                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
+
+                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
+                            } else {
+                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                            }
+                        }
+                    }
+                    // Mark RSX as changed if text was deactivated (focus lost)
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        rsx_changed = true;
+
+                        // Also load on focus lost
+                        if (midi_pad_player && pad->midi_file[0] != '\0') {
                             char midi_path[512];
                             samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
 
@@ -3475,7 +3510,15 @@ int main(int argc, char* argv[]) {
                                 } else {
                                     // Not playing - start/retrigger MIDI file playback
                                     std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
-                                    midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+
+                                    // Use quantized trigger if MIDI clock is active, otherwise immediate
+                                    if (midi_clock.active && midi_clock.running) {
+                                        // Use configured quantization
+                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx, midi_clock.beat_count, midi_quantize_beats);
+                                    } else {
+                                        // No MIDI clock - trigger immediately
+                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                    }
                                     note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
                                 }
 
@@ -3984,7 +4027,40 @@ int main(int argc, char* argv[]) {
                 }
             }
             else if (ui_mode == UI_MODE_SETTINGS) {
-                // SETTINGS MODE: Audio device configuration
+                // SETTINGS MODE: Audio and MIDI sync configuration
+                ImGui::Text("MIDI SYNC SETTINGS");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::Text("MIDI Clock Quantization:");
+                ImGui::TextWrapped("When MIDI Clock is active, pads trigger on beat boundaries");
+                ImGui::Spacing();
+
+                const char* quantize_options[] = {
+                    "1 Beat (Quarter Note)",
+                    "2 Beats (Half Note)",
+                    "4 Beats (One Bar - 4/4)",
+                    "8 Beats (Two Bars)"
+                };
+                int quantize_index = 0;
+                if (midi_quantize_beats == 1) quantize_index = 0;
+                else if (midi_quantize_beats == 2) quantize_index = 1;
+                else if (midi_quantize_beats == 4) quantize_index = 2;
+                else if (midi_quantize_beats == 8) quantize_index = 3;
+
+                if (ImGui::Combo("Quantize To", &quantize_index, quantize_options, 4)) {
+                    switch(quantize_index) {
+                        case 0: midi_quantize_beats = 1; break;
+                        case 1: midi_quantize_beats = 2; break;
+                        case 2: midi_quantize_beats = 4; break;
+                        case 3: midi_quantize_beats = 8; break;
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 ImGui::Text("AUDIO SETTINGS");
                 ImGui::Separator();
                 ImGui::Spacing();

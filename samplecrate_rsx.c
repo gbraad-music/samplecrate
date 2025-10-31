@@ -602,7 +602,8 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
     // Write note trigger pads
     fprintf(f, "[NoteTriggerPads]\n");
     for (int i = 0; i < rsx->num_pads; i++) {
-        if (rsx->pads[i].note < 0) continue;
+        // Save pad if it has a note OR a MIDI file configured
+        if (rsx->pads[i].note < 0 && rsx->pads[i].midi_file[0] == '\0') continue;
 
         int pad_num = i + 1;
         fprintf(f, "pad_N%d_note=%d\n", pad_num, rsx->pads[i].note);

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 using namespace smf;
 
@@ -21,8 +22,14 @@ struct MidiFilePlayer {
     MidiFileEventCallback callback;
     void* userdata;
 
+    MidiFileLoopCallback loop_callback;
+    void* loop_userdata;
+
     bool playing;
     bool loop;                 // Loop playback
+    bool scheduled;            // Waiting for quantized start
+    int scheduled_start_beat;  // Beat number to start on (-1 = not scheduled)
+    int start_beat;            // Beat when playback started (for master clock sync)
     float tempo_bpm;           // Current tempo in BPM
     float position_seconds;    // Current playback position in seconds
     float duration_seconds;    // Total duration in seconds
@@ -37,8 +44,13 @@ MidiFilePlayer* midi_file_player_create(void) {
     MidiFilePlayer* player = new MidiFilePlayer();
     player->callback = nullptr;
     player->userdata = nullptr;
+    player->loop_callback = nullptr;
+    player->loop_userdata = nullptr;
     player->playing = false;
     player->loop = false;  // Default: no looping
+    player->scheduled = false;  // Not scheduled
+    player->scheduled_start_beat = -1;  // No scheduled beat
+    player->start_beat = -1;  // No start beat yet
     player->tempo_bpm = 125.0f;  // Default BPM is 125
     player->position_seconds = 0.0f;
     player->duration_seconds = 0.0f;
@@ -115,12 +127,34 @@ int midi_file_player_load(MidiFilePlayer* player, const char* filename) {
 void midi_file_player_play(MidiFilePlayer* player) {
     if (!player) return;
 
-    std::cout << "midi_file_player_play: Starting playback, event_count=" << player->events.size()
+    std::cout << "midi_file_player_play: Starting playback immediately, event_count=" << player->events.size()
               << " duration=" << player->duration_seconds << "s" << std::endl;
 
     player->playing = true;
+    player->scheduled = false;
+    player->scheduled_start_beat = -1;
+    player->start_beat = -1;  // Will be set on first update
     player->position_seconds = 0.0f;
     player->active_notes.clear();
+}
+
+// Schedule playback to start on a specific beat (for quantization)
+int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, int quantize_beats) {
+    if (!player) return -1;
+
+    // Calculate the next quantized beat
+    int next_beat = ((current_beat / quantize_beats) + 1) * quantize_beats;
+
+    std::cout << "midi_file_player_play_quantized: Scheduling playback for beat " << next_beat
+              << " (current=" << current_beat << ", quantize=" << quantize_beats << ")" << std::endl;
+
+    player->playing = false;  // Not playing yet
+    player->scheduled = true;
+    player->scheduled_start_beat = next_beat;
+    player->position_seconds = 0.0f;
+    player->active_notes.clear();
+
+    return next_beat;
 }
 
 // Stop playback
@@ -128,6 +162,8 @@ void midi_file_player_stop(MidiFilePlayer* player) {
     if (!player) return;
 
     player->playing = false;
+    player->scheduled = false;
+    player->scheduled_start_beat = -1;
 
     // Send note-off for all active notes
     if (player->callback) {
@@ -138,10 +174,10 @@ void midi_file_player_stop(MidiFilePlayer* player) {
     player->active_notes.clear();
 }
 
-// Check if currently playing
+// Check if currently playing (includes scheduled playback)
 int midi_file_player_is_playing(MidiFilePlayer* player) {
     if (!player) return 0;
-    return player->playing ? 1 : 0;
+    return (player->playing || player->scheduled) ? 1 : 0;
 }
 
 // Set tempo in BPM
@@ -170,6 +206,13 @@ void midi_file_player_set_callback(MidiFilePlayer* player, MidiFileEventCallback
     player->userdata = userdata;
 }
 
+// Set the loop restart callback
+void midi_file_player_set_loop_callback(MidiFilePlayer* player, MidiFileLoopCallback callback, void* userdata) {
+    if (!player) return;
+    player->loop_callback = callback;
+    player->loop_userdata = userdata;
+}
+
 // Set looping mode
 void midi_file_player_set_loop(MidiFilePlayer* player, int loop) {
     if (!player) return;
@@ -183,34 +226,114 @@ int midi_file_player_get_loop(MidiFilePlayer* player) {
 }
 
 // Update playback
-void midi_file_player_update(MidiFilePlayer* player, float delta_ms) {
-    if (!player || !player->playing || !player->callback) return;
+void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current_beat) {
+    if (!player || !player->callback) return;
+
+    // Check if we're scheduled to start and the beat has arrived
+    if (player->scheduled && current_beat >= 0) {
+        if (current_beat >= player->scheduled_start_beat) {
+            std::cout << "midi_file_player_update: Starting scheduled playback on beat " << current_beat << std::endl;
+            player->scheduled = false;
+            player->scheduled_start_beat = -1;
+            player->playing = true;
+            player->start_beat = current_beat;
+            player->position_seconds = 0.0f;
+        } else {
+            // Still waiting for the scheduled beat
+            return;
+        }
+    }
+
+    if (!player->playing) return;
 
     float old_position = player->position_seconds;
-    player->position_seconds += delta_ms / 1000.0f;
 
-    // Handle reaching the end
-    if (player->position_seconds >= player->duration_seconds) {
-        if (player->loop) {
-            // Loop back to beginning - send all note-offs first for clean loop
-            if (player->callback) {
-                for (int note : player->active_notes) {
-                    player->callback(note, 0, 0, player->userdata);
+    // If MIDI clock is active (current_beat >= 0), use beat-based sync for perfect timing
+    // Otherwise fall back to delta_ms
+    if (current_beat >= 0) {
+        // First update: record start beat
+        if (player->start_beat < 0) {
+            player->start_beat = current_beat;
+        }
+
+        // Calculate position from beats elapsed since start
+        int beats_elapsed = current_beat - player->start_beat;
+        float seconds_per_beat = 60.0f / player->tempo_bpm;
+        float new_position = beats_elapsed * seconds_per_beat;
+
+        // Handle looping with beat precision
+        if (player->loop && player->duration_seconds > 0.0f) {
+            // Use modulo for seamless looping
+            player->position_seconds = fmod(new_position, player->duration_seconds);
+
+            // Detect loop restart (position wrapped around)
+            if (new_position >= player->duration_seconds && old_position < player->duration_seconds) {
+                std::cout << "[LOOP] beat=" << current_beat << " old_pos=" << old_position
+                          << " new_pos=" << new_position << " duration=" << player->duration_seconds
+                          << " wrapped_pos=" << player->position_seconds << std::endl;
+
+                // Send note-offs for active notes
+                if (player->callback) {
+                    for (int note : player->active_notes) {
+                        player->callback(note, 0, 0, player->userdata);
+                    }
+                }
+                player->active_notes.clear();
+
+                // Fire loop restart callback
+                if (player->loop_callback) {
+                    player->loop_callback(player->loop_userdata);
                 }
             }
-            player->active_notes.clear();
-            player->position_seconds = 0.0f;
-            old_position = 0.0f;
         } else {
-            // Stop playback
+            player->position_seconds = new_position;
+        }
+
+        // Stop if reached end and not looping
+        if (player->position_seconds >= player->duration_seconds && !player->loop) {
             midi_file_player_stop(player);
             return;
+        }
+    } else {
+        // No MIDI clock - use delta_ms (fallback mode)
+        player->position_seconds += delta_ms / 1000.0f;
+
+        // Handle reaching the end
+        if (player->position_seconds >= player->duration_seconds) {
+            if (player->loop) {
+                // Loop back to beginning - send all note-offs first for clean loop
+                if (player->callback) {
+                    for (int note : player->active_notes) {
+                        player->callback(note, 0, 0, player->userdata);
+                    }
+                }
+                player->active_notes.clear();
+                player->position_seconds = 0.0f;
+                old_position = 0.0f;
+
+                // Fire loop restart callback
+                if (player->loop_callback) {
+                    player->loop_callback(player->loop_userdata);
+                }
+            } else {
+                // Stop playback
+                midi_file_player_stop(player);
+                return;
+            }
         }
     }
 
     // Convert positions to ticks
     int old_tick = (int)(old_position * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
     int new_tick = (int)(player->position_seconds * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
+
+    // Log tick range near loop boundaries
+    static int last_new_tick = -1;
+    if (old_tick > new_tick || (last_new_tick > 0 && new_tick < last_new_tick)) {
+        std::cout << "[TICK] old_tick=" << old_tick << " new_tick=" << new_tick
+                  << " old_pos=" << old_position << " new_pos=" << player->position_seconds << std::endl;
+    }
+    last_new_tick = new_tick;
 
     // Fire events between old_tick and new_tick
     for (const MidiEventState& evt : player->events) {
