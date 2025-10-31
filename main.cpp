@@ -2948,7 +2948,13 @@ int main(int argc, char* argv[]) {
                         snprintf(pan_id, sizeof(pan_id), "##prog%d_pan", i);
                         ImGui::PushItemWidth(sliderW);
                         if (ImGui::SliderFloat(pan_id, &mixer.program_pans[i], 0.0f, 1.0f, "")) {
-                            // Could add MIDI learn here later
+                            // Sync to RSX and autosave
+                            if (rsx) {
+                                rsx->program_pans[i] = mixer.program_pans[i];
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
                         }
                         ImGui::PopItemWidth();
                         ImGui::Dummy(ImVec2(0, 2.0f));
@@ -2957,7 +2963,13 @@ int main(int argc, char* argv[]) {
                         char slider_id[32];
                         snprintf(slider_id, sizeof(slider_id), "##prog%d_vol", i);
                         if (ImGui::VSliderFloat(slider_id, ImVec2(sliderW, sliderH), &mixer.program_volumes[i], 0.0f, 1.0f, "")) {
-                            // Could add MIDI learn here later
+                            // Sync to RSX and autosave
+                            if (rsx) {
+                                rsx->program_volumes[i] = mixer.program_volumes[i];
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
                         }
                         ImGui::Dummy(ImVec2(0, 8.0f));
 
