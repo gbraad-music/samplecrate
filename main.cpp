@@ -4126,6 +4126,64 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
+                // MIDI SYNC SETTINGS
+                ImGui::Text("MIDI CLOCK SYNC:");
+                ImGui::Spacing();
+
+                // MIDI Clock Tempo Sync
+                bool midi_clock_tempo_sync = (config.midi_clock_tempo_sync == 1);
+                if (ImGui::Checkbox("Sync Playback Tempo to MIDI Clock", &midi_clock_tempo_sync)) {
+                    config.midi_clock_tempo_sync = midi_clock_tempo_sync ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When enabled, MIDI file playback tempo follows external MIDI clock");
+
+                ImGui::Spacing();
+
+                // MIDI SPP Receive
+                bool midi_spp_receive = (config.midi_spp_receive == 1);
+                if (ImGui::Checkbox("Receive Song Position Pointer (SPP)", &midi_spp_receive)) {
+                    config.midi_spp_receive = midi_spp_receive ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When enabled, sync playback position to external MIDI clock");
+
+                ImGui::Spacing();
+
+                // MIDI Clock Quantization
+                ImGui::Text("MIDI Clock Quantization:");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When MIDI Clock is active, pads trigger on beat boundaries");
+                ImGui::Spacing();
+
+                const char* quantize_options[] = {
+                    "1 Beat (Quarter Note)",
+                    "2 Beats (Half Note)",
+                    "4 Beats (One Bar - 4/4)",
+                    "8 Beats (Two Bars)"
+                };
+                int quantize_index = 0;
+                if (midi_quantize_beats == 1) quantize_index = 0;
+                else if (midi_quantize_beats == 2) quantize_index = 1;
+                else if (midi_quantize_beats == 4) quantize_index = 2;
+                else if (midi_quantize_beats == 8) quantize_index = 3;
+
+                if (ImGui::Combo("Quantize To", &quantize_index, quantize_options, 4)) {
+                    switch(quantize_index) {
+                        case 0: midi_quantize_beats = 1; break;
+                        case 1: midi_quantize_beats = 2; break;
+                        case 2: midi_quantize_beats = 4; break;
+                        case 3: midi_quantize_beats = 8; break;
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 // MIDI mappings display
                 if (input_mappings) {
                     ImGui::Text("MIDI Mappings: %d", input_mappings->midi_count);
@@ -4257,40 +4315,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             else if (ui_mode == UI_MODE_SETTINGS) {
-                // SETTINGS MODE: Audio and MIDI sync configuration
-                ImGui::Text("MIDI SYNC SETTINGS");
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::Text("MIDI Clock Quantization:");
-                ImGui::TextWrapped("When MIDI Clock is active, pads trigger on beat boundaries");
-                ImGui::Spacing();
-
-                const char* quantize_options[] = {
-                    "1 Beat (Quarter Note)",
-                    "2 Beats (Half Note)",
-                    "4 Beats (One Bar - 4/4)",
-                    "8 Beats (Two Bars)"
-                };
-                int quantize_index = 0;
-                if (midi_quantize_beats == 1) quantize_index = 0;
-                else if (midi_quantize_beats == 2) quantize_index = 1;
-                else if (midi_quantize_beats == 4) quantize_index = 2;
-                else if (midi_quantize_beats == 8) quantize_index = 3;
-
-                if (ImGui::Combo("Quantize To", &quantize_index, quantize_options, 4)) {
-                    switch(quantize_index) {
-                        case 0: midi_quantize_beats = 1; break;
-                        case 1: midi_quantize_beats = 2; break;
-                        case 2: midi_quantize_beats = 4; break;
-                        case 3: midi_quantize_beats = 8; break;
-                    }
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
+                // SETTINGS MODE: Audio configuration
                 ImGui::Text("AUDIO SETTINGS");
                 ImGui::Separator();
                 ImGui::Spacing();
