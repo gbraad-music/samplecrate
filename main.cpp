@@ -81,6 +81,9 @@ int midi_pad_indices[RSX_MAX_NOTE_PADS];
 // MIDI sync/quantization settings
 int midi_quantize_beats = 1;  // Quantize to this many beats (1=quarter, 2=half, 4=bar)
 
+// Tempo control (for MIDI file playback)
+float tempo_bpm = 125.0f;  // Default BPM
+
 // Note pad visual feedback
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
 float note_pad_loop_fade[RSX_MAX_NOTE_PADS] = {0.0f};      // Loop restart fade (blue/cyan)
@@ -754,11 +757,15 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 uint64_t total_time = now - midi_clock.last_bpm_calc_time;
                 // BPM = (60,000,000 microseconds/minute) / (time for one quarter note in microseconds)
                 if (total_time > 0) {
-                    midi_clock.bpm = 60000000.0f / total_time;
+                    float new_bpm = 60000000.0f / total_time;
 
-                    // Sync MIDI file player tempo to MIDI clock BPM
-                    if (midi_pad_player && midi_clock.bpm > 0.0f) {
+                    // Only update tempo if it changed significantly (more than 0.5 BPM)
+                    // This prevents constant tiny adjustments that cause timing glitches
+                    if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
+                        midi_clock.bpm = new_bpm;
                         midi_file_pad_player_set_tempo(midi_pad_player, midi_clock.bpm);
+                    } else {
+                        midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
                     }
                 }
                 midi_clock.pulse_count = 0;
@@ -1808,26 +1815,26 @@ int main(int argc, char* argv[]) {
                     if (current_note >= 0) {
                         if (prog_display[0] != '\0') {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\nNote: %d Vel: %d",
+                                     "Prg %d/%d: %s%s\nNote: %d Vel: %d BPM:%.0f",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info, current_note, current_velocity);
+                                     prog_display, clock_info, current_note, current_velocity, tempo_bpm);
                         } else {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\nNote: %d Vel: %d",
+                                     "Prg %d/%d%s\nNote: %d Vel: %d BPM:%.0f",
                                      current_program + 1, rsx->num_programs,
-                                     clock_info, current_note, current_velocity);
+                                     clock_info, current_note, current_velocity, tempo_bpm);
                         }
                     } else {
                         if (prog_display[0] != '\0') {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\n[Ready]",
+                                     "Prg %d/%d: %s%s\n[Ready] BPM:%.0f",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info);
+                                     prog_display, clock_info, tempo_bpm);
                         } else {
                             snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\n[Ready]",
+                                     "Prg %d/%d%s\n[Ready] BPM:%.0f",
                                      current_program + 1, rsx->num_programs,
-                                     clock_info);
+                                     clock_info, tempo_bpm);
                         }
                     }
                 } else {
@@ -1840,12 +1847,12 @@ int main(int argc, char* argv[]) {
 
                     if (current_note >= 0) {
                         snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\nNote: %d Vel: %d",
-                                 sfz_filename.c_str(), clock_info, current_note, current_velocity);
+                                 "File: %s%s\nNote: %d Vel: %d BPM:%.0f",
+                                 sfz_filename.c_str(), clock_info, current_note, current_velocity, tempo_bpm);
                     } else {
                         snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\n[Ready]",
-                                 sfz_filename.c_str(), clock_info);
+                                 "File: %s%s\n[Ready] BPM:%.0f",
+                                 sfz_filename.c_str(), clock_info, tempo_bpm);
                     }
                 }
                 lcd_write(lcd_display, lcd_text);
@@ -2875,6 +2882,44 @@ int main(int argc, char* argv[]) {
                     ImGui::EndGroup();
                     col_index++;
                 }
+
+                // TEMPO slider (for MIDI file playback)
+                {
+                    float colX = origin.x + col_index * (sliderW + spacing);
+                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
+                    ImGui::BeginGroup();
+                    ImGui::Text("TEMPO");
+                    ImGui::Dummy(ImVec2(0, 4.0f));
+
+                    // Spacer to match other channels (no FX button)
+                    ImGui::Dummy(ImVec2(0, SOLO_SIZE + 2.0f));
+
+                    // Spacer to match pan slider position (20.0f pan slider height)
+                    ImGui::Dummy(ImVec2(sliderW, 20.0f));
+                    ImGui::Dummy(ImVec2(0, 2.0f));
+
+                    // Tempo slider (50 BPM to 200 BPM)
+                    // Up = faster (200), Down = slower (50)
+                    float prev_tempo = tempo_bpm;
+                    if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
+                        if (prev_tempo != tempo_bpm && midi_pad_player) {
+                            // Update MIDI file player tempo
+                            midi_file_pad_player_set_tempo(midi_pad_player, tempo_bpm);
+                        }
+                    }
+                    ImGui::Dummy(ImVec2(0, 8.0f));
+
+                    // Reset button (reset to default 125 BPM)
+                    if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
+                        tempo_bpm = 125.0f;
+                        if (midi_pad_player) {
+                            midi_file_pad_player_set_tempo(midi_pad_player, tempo_bpm);
+                        }
+                    }
+
+                    ImGui::EndGroup();
+                    col_index++;
+                }
             }
             else if (ui_mode == UI_MODE_EFFECTS) {
                 // EFFECTS MODE: Effect parameters (matching mock-ui.cpp layout)
@@ -3625,8 +3670,9 @@ int main(int argc, char* argv[]) {
                                     note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
                                 }
 
-                                // Mark as held to prevent retriggering while mouse is down
-                                held_pad_index = pad_idx;
+                                // Mark as held to prevent retriggering while mouse is down (MIDI file pads only)
+                                // DON'T set held_pad_index here - that's for regular note pads with note-off!
+                                // held_pad_index = pad_idx;  // REMOVED - causes issues with note-off for regular pads
                             } else {
                                 // Regular single note trigger
                                 // Determine which synth to use based on pad's program setting
