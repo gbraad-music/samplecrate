@@ -2,3 +2,6 @@ assets/
 build/
 build-windows/
 build-sfizz-mingw/
+samplecrate*-windows-x64/
+samplecrate*-windows-x64.zip
+

@@ -87,6 +87,7 @@ typedef struct {
     float volume;                       // Volume (0.0 to 1.0, use NaN for not set)
     int enabled;                        // 1=enabled, 0=disabled
     int program;                        // Program index (0-3 for prog 1-4, -1=current program)
+    char midi_file[RSX_MAX_PATH];       // MIDI file path (empty = single note mode, non-empty = play MIDI file)
 } NoteTriggerPad;
 
 // RSX file content

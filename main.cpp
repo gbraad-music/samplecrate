@@ -8,11 +8,17 @@
 #include <atomic>
 #include <vector>
 #include <iostream>
-#include <unistd.h>
 #include <cstring>
 #include <mutex>
 #include <chrono>
 #include <libgen.h>
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <direct.h>
+#include <stdlib.h>
+#define getcwd _getcwd
+#endif
 
 extern "C" {
 #include "lcd.h"
@@ -22,6 +28,17 @@ extern "C" {
 #include "midi.h"
 #include "input_mappings.h"
 #include "sfz_builder.h"
+#include "midi_file_player.h"
+#include "midi_file_pad_player.h"
+}
+
+// Cross-platform realpath wrapper
+static char* cross_platform_realpath(const char* path, char* resolved_path) {
+#ifdef _WIN32
+    return _fullpath(resolved_path, path, 1024);
+#else
+    return realpath(path, resolved_path);
+#endif
 }
 
 sfizz_synth_t* synth = nullptr;  // Current/legacy synth
@@ -55,8 +72,22 @@ int num_audio_devices = 0;  // Number of available audio output devices
 SamplecrateRSX* rsx = nullptr;
 std::string rsx_file_path = "";
 
+// MIDI file pad player
+MidiFilePadPlayer* midi_pad_player = nullptr;
+
+// Pad index storage for MIDI file callbacks (so each pad knows which program to use)
+int midi_pad_indices[RSX_MAX_NOTE_PADS];
+
+// MIDI sync/quantization settings
+int midi_quantize_beats = 4;  // Quantize to this many beats (1=quarter, 2=half, 4=bar, 8=2 bars) - loaded from config
+
+// Tempo control (for MIDI file playback)
+float tempo_bpm = 125.0f;  // Manual tempo slider value
+float active_bpm = 125.0f;  // Actual playback tempo (updated by MIDI clock or manual slider)
+
 // Note pad visual feedback
-float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};
+float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
+float note_pad_loop_fade[RSX_MAX_NOTE_PADS] = {0.0f};      // Loop restart fade (blue/cyan)
 
 // Note suppression state (128 MIDI notes, 0-127)
 // [note][0] = global suppression (program -1)
@@ -73,8 +104,12 @@ struct {
     bool running = false;          // Transport running (start/continue)
     float bpm = 0.0f;             // Calculated BPM
     uint64_t last_clock_time = 0; // Last clock pulse timestamp (microseconds)
-    int pulse_count = 0;          // Pulses since last calculation
+    int pulse_count = 0;          // Pulses since last beat (0-23)
+    int beat_count = 0;           // Total quarter note beats since start
+    int total_pulse_count = 0;    // Total pulses since start (for sub-beat precision: 24 ppqn)
     uint64_t last_bpm_calc_time = 0; // Last BPM calculation time
+    int spp_position = 0;         // Song Position Pointer (in 16th notes / MIDI beats)
+    bool spp_synced = false;      // True if we've received SPP and synced to it
 } midi_clock;
 
 // Error message for LCD display
@@ -323,7 +358,7 @@ void reload_program(int program_idx) {
 
             char* dir = dirname(rsx_dir);
             char absolute_dir[1024];
-            char* resolved = realpath(dir, absolute_dir);
+            char* resolved = cross_platform_realpath(dir, absolute_dir);
             const char* base_path = resolved ? absolute_dir : dir;
 
             // Load directly using sfz_builder_load (tries string first, falls back to temp file)
@@ -696,6 +731,17 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     int msg_type = status & 0xF0;
     int channel = status & 0x0F;
 
+    // Debug: Log only important real-time MIDI messages (start, stop, continue)
+    // Clock (0xF8) is too spammy - it fires 24 times per beat!
+    if (status >= 0xF8 && status != 0xF8) {
+        std::cout << "[MIDI RT] Received: 0x" << std::hex << (int)status << std::dec;
+        if (status == 0xFA) std::cout << " (Start)";
+        else if (status == 0xFC) std::cout << " (Stop)";
+        else if (status == 0xFB) std::cout << " (Continue)";
+        else if (status == 0xF2) std::cout << " (SPP)";
+        std::cout << std::endl;
+    }
+
     // Handle MIDI Clock messages (Real-Time messages - these don't have channels)
     if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
         uint64_t now = get_microseconds();
@@ -703,15 +749,47 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         if (midi_clock.last_clock_time > 0) {
             uint64_t interval = now - midi_clock.last_clock_time;
 
+            // Increment total pulse count for sub-beat precision
+            midi_clock.total_pulse_count++;
+
             // Calculate BPM every 24 pulses (one quarter note)
             midi_clock.pulse_count++;
             if (midi_clock.pulse_count >= 24) {
                 uint64_t total_time = now - midi_clock.last_bpm_calc_time;
                 // BPM = (60,000,000 microseconds/minute) / (time for one quarter note in microseconds)
                 if (total_time > 0) {
-                    midi_clock.bpm = 60000000.0f / total_time;
+                    float raw_bpm = 60000000.0f / total_time;
+
+                    // Smooth BPM using exponential moving average to reduce jitter
+                    // Alpha = 0.3 gives moderate smoothing (lower = more smoothing)
+                    static float smoothed_bpm = 0.0f;
+                    if (smoothed_bpm == 0.0f) {
+                        smoothed_bpm = raw_bpm;  // Initialize on first reading
+                    } else {
+                        smoothed_bpm = smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
+                    }
+
+                    float new_bpm = smoothed_bpm;
+
+                    // Only update tempo if it changed significantly (more than 0.5 BPM)
+                    // This prevents constant tiny adjustments that cause timing glitches
+                    if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
+                        std::cout << "MIDI CLOCK: BPM changed from " << midi_clock.bpm
+                                  << " to " << new_bpm
+                                  << " (raw: " << raw_bpm << ", smoothed, interval=" << total_time << "us)" << std::endl;
+                        midi_clock.bpm = new_bpm;
+                        // Only adjust playback tempo if sync is enabled
+                        if (config.midi_clock_tempo_sync == 1) {
+                            active_bpm = midi_clock.bpm;  // Update active playback tempo
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            std::cout << "  -> active_bpm updated to " << active_bpm << std::endl;
+                        }
+                    } else {
+                        midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
+                    }
                 }
                 midi_clock.pulse_count = 0;
+                midi_clock.beat_count++;  // Increment beat counter
                 midi_clock.last_bpm_calc_time = now;
             }
         } else {
@@ -724,6 +802,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     } else if (status == 0xFA) {  // MIDI Start
         midi_clock.running = true;
         midi_clock.pulse_count = 0;
+        midi_clock.beat_count = 0;  // Reset beat counter on start
+        midi_clock.total_pulse_count = 0;  // Reset total pulse count for precise sync
         midi_clock.last_bpm_calc_time = get_microseconds();
         std::cout << "MIDI Start received" << std::endl;
         return;
@@ -735,12 +815,46 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         midi_clock.running = true;
         std::cout << "MIDI Continue received" << std::endl;
         return;
+    } else if (status == 0xF2) {  // MIDI Song Position Pointer
+        // SPP format: 0xF2, LSB (7-bit), MSB (7-bit)
+        // Position is in "MIDI beats" (1/16th notes from start of song)
+        int spp_position = data1 | (data2 << 7);
+        midi_clock.spp_position = spp_position;
+
+        std::cout << "DEBUG: SPP handler called, position=" << spp_position
+                  << ", config.midi_spp_receive=" << config.midi_spp_receive << std::endl;
+
+        // Only sync position if SPP receive is enabled
+        if (config.midi_spp_receive == 1) {
+            midi_clock.spp_synced = true;
+            midi_clock.active = true;  // SPP implies MIDI clock is active
+            midi_clock.running = true; // SPP implies transport is running
+
+            // SPP is a PATTERN position marker - tells us where we are in the repeating loop
+            // We use it to align playback when triggering pads
+            // We do NOT use it to constantly adjust running playback (that causes instability)
+
+            int beat_number = spp_position / 4;  // Convert 16th notes to quarter notes
+            int pulse_from_spp = spp_position * 6;  // Each 16th note = 6 MIDI clock pulses
+
+            std::cout << "MIDI SPP received: position=" << spp_position << " (16th notes), beat="
+                      << beat_number << ", spp_pulse=" << pulse_from_spp
+                      << " | Local pulse=" << midi_clock.total_pulse_count
+                      << std::endl;
+
+            // SPP just updates our knowledge of the pattern position
+            // The actual sync happens when pads are triggered (they start at the SPP position)
+        } else {
+            std::cout << "MIDI SPP received but IGNORED (disabled in settings): position="
+                      << spp_position << std::endl;
+        }
+        return;
     }
 
-    // Debug: print all incoming MIDI messages
-    std::cout << "MIDI device " << device_id << ": status=0x" << std::hex << (int)status
-              << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
-              << " channel=" << (channel + 1) << std::endl;
+    // Debug: print all incoming MIDI messages (DISABLED - too noisy)
+    // std::cout << "MIDI device " << device_id << ": status=0x" << std::hex << (int)status
+    //           << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
+    //           << " channel=" << (channel + 1) << std::endl;
 
     // Channel filtering (for channel voice messages, not system messages)
     // System messages (0xF0-0xFF) don't have channels, so we don't filter them
@@ -762,7 +876,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     // Handle program change
     if (msg_type == 0xC0) {  // Program Change
         int program_number = data1;  // 0-127
-        std::cout << "*** PROGRAM CHANGE RECEIVED from device " << device_id << ": program=" << program_number << " ***" << std::endl;
+        // std::cout << "*** PROGRAM CHANGE RECEIVED from device " << device_id << ": program=" << program_number << " ***" << std::endl;
 
         // Check if program change is enabled for this specific device
         // When disabled: UI program selection leads for all MIDI messages from this device
@@ -776,11 +890,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             // Map MIDI program number to our programs (0-3)
             int target_program = program_number % rsx->num_programs;
             midi_target_program[device_id] = target_program;
-            std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
-                      << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
-                      << " - UI remains at program " << (current_program + 1) << std::endl;
+            // std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
+            //           << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
+            //           << " - UI remains at program " << (current_program + 1) << std::endl;
         } else {
-            std::cout << "    No RSX programs loaded, ignoring Program Change" << std::endl;
+            // std::cout << "    No RSX programs loaded, ignoring Program Change" << std::endl;
         }
         return;
     }
@@ -931,6 +1045,77 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     float* out = reinterpret_cast<float*>(stream);
     int frames = len / (sizeof(float) * 2); // stereo
 
+    // Update MIDI file playback BEFORE acquiring the lock
+    // This runs in the audio thread for perfect timing (no UI blocking!)
+    // The MIDI event callbacks will acquire the lock themselves
+    if (midi_pad_player) {
+        // Pass current pulse count for sub-beat precision MIDI clock sync
+        // total_pulse_count gives us 24 ppqn resolution instead of just beat resolution
+        // Convert to "beat number" by dividing: beat = total_pulses / 24
+        // (-1 if no MIDI clock)
+
+        // Debug MIDI clock state once
+        // static bool logged_clock_state = false;
+        // if (!logged_clock_state) {
+        //     std::cout << "=== SAMPLECRATE BUILD v2025-10-31_fix-wrap-duplicates ===" << std::endl;
+        //     std::cout << "AUDIO CALLBACK: midi_clock.active=" << midi_clock.active
+        //               << " total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
+        //     logged_clock_state = true;
+        // }
+
+        // Pass MIDI clock pulse count if active, otherwise -1
+        // This enables quantized triggering to wait for beat boundaries
+        // If MIDI clock/SPP is active but clock pulses stopped, use internal timing
+        int current_pulse = -1;
+        if (midi_clock.active && midi_clock.running) {
+            // Check if MIDI clock pulses have stopped (no pulse in last 100ms)
+            static uint64_t last_internal_update = 0;
+            static float accumulated_pulses = 0.0f;
+            uint64_t now = get_microseconds();
+            bool clock_stopped = (midi_clock.last_clock_time > 0) && 
+                                ((now - midi_clock.last_clock_time) > 100000); // 100ms threshold
+
+            if (clock_stopped && active_bpm > 0) {
+                // MIDI clock stopped - use internal timing to keep pulse count advancing
+                // Calculate how many pulses should have elapsed based on time and BPM
+                if (last_internal_update == 0) {
+                    last_internal_update = now;
+                    std::cout << "INTERNAL CLOCK: Switching from MIDI clock to internal timing"
+                              << " | active_bpm=" << active_bpm
+                              << " | midi_clock.bpm=" << midi_clock.bpm << std::endl;
+                }
+                
+                uint64_t time_delta = now - last_internal_update;
+
+
+                // Pulses per microsecond = (BPM * 24) / 60000000
+                float pulses_per_us = (active_bpm * 24.0f) / 60000000.0f;
+                float exact_pulses = time_delta * pulses_per_us;
+                accumulated_pulses += exact_pulses;
+
+                int pulse_increment = (int)accumulated_pulses;
+
+                if (pulse_increment > 0) {
+                    midi_clock.total_pulse_count += pulse_increment;
+                    accumulated_pulses -= pulse_increment;  // Keep the fractional part
+                    last_internal_update = now;
+                } else {
+                    // Update timestamp even if no pulse yet (accumulating fractions)
+                    last_internal_update = now;
+                }
+            } else if (!clock_stopped) {
+                // Clock is running - reset internal timer
+                if (last_internal_update > 0) {
+                    std::cout << "INTERNAL CLOCK: Switching back to MIDI clock" << std::endl;
+                }
+                last_internal_update = 0;
+            }
+            
+            current_pulse = midi_clock.total_pulse_count;
+        }
+        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_pulse);
+    }
+
     std::lock_guard<std::mutex> lock(synth_mutex);
 
     // Create temporary buffers for left and right channels
@@ -1035,6 +1220,70 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     for (int i = 0; i < frames; i++) {
         out[i * 2] = left[i];
         out[i * 2 + 1] = right[i];
+    }
+}
+
+// MIDI file loop restart callback - triggers visual blink
+void midi_file_loop_callback(void* userdata) {
+    int pad_index = userdata ? *((int*)userdata) : -1;
+    if (pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "[" << ms << "] LOOP pad=" << (pad_index + 1) << std::endl;
+        note_pad_loop_fade[pad_index] = 1.0f;  // Trigger blue/cyan blink on loop restart
+    }
+}
+
+// Debug flag for MIDI event logging (disable for better performance)
+static const bool DEBUG_MIDI_EVENTS = false;
+
+// MIDI file player callback - sends note events to the appropriate synth
+void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
+    std::lock_guard<std::mutex> lock(synth_mutex);
+
+    // Get pad index from userdata to determine which program to use
+    int pad_index = userdata ? *((int*)userdata) : -1;
+
+    // Trigger visual feedback on note ON events
+    if (on && pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
+        note_pad_fade[pad_index] = 1.0f;  // Trigger white/bright blink on each note
+    }
+
+    // Optional: Log event timing for debugging sync issues (causes I/O blocking!)
+    if (DEBUG_MIDI_EVENTS) {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "[" << ms << "] NOTE pad=" << (pad_index + 1)
+                  << " note=" << note << " vel=" << velocity << " " << (on ? "ON" : "OFF") << std::endl;
+    }
+
+    // Determine target program based on pad configuration
+    int target_program = current_program;
+    int pad_velocity = 100;  // Default velocity
+    if (rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
+        NoteTriggerPad* pad = &rsx->pads[pad_index];
+        if (pad->program >= 0 && pad->program < rsx->num_programs) {
+            target_program = pad->program;
+        }
+        // Get pad's configured velocity
+        pad_velocity = pad->velocity > 0 ? pad->velocity : 100;
+    }
+
+    // Scale MIDI file velocity by pad's configured velocity
+    // Formula: scaled_velocity = (midi_velocity * pad_velocity) / 100
+    // This allows pad velocity to act as a "playback volume" control (0-127)
+    int scaled_velocity = (velocity * pad_velocity) / 100;
+    if (scaled_velocity > 127) scaled_velocity = 127;  // Clamp to MIDI range
+    if (scaled_velocity < 0) scaled_velocity = 0;
+
+    // Send to target program synth
+    sfizz_synth_t* target_synth = program_synths[target_program];
+    if (target_synth) {
+        if (on) {
+            sfizz_send_note_on(target_synth, 0, note, scaled_velocity);
+        } else {
+            sfizz_send_note_off(target_synth, 0, note, 0);
+        }
     }
 }
 
@@ -1186,6 +1435,12 @@ int main(int argc, char* argv[]) {
     // Load expanded pads setting from config
     expanded_pads = (config.expanded_pads != 0);
 
+    // Load MIDI quantize setting from config
+    midi_quantize_beats = config.midi_quantize_beats;
+
+    // Load MIDI quantize setting from config
+    midi_quantize_beats = config.midi_quantize_beats;
+
     // Apply config defaults to mixer
     mixer.master_volume = config.default_master_volume;
     mixer.master_pan = config.default_master_pan;
@@ -1244,6 +1499,19 @@ int main(int argc, char* argv[]) {
             regroove_effects_set_delay_feedback(effects_program[i], config.fx_delay_feedback);
             regroove_effects_set_delay_mix(effects_program[i], config.fx_delay_mix);
         }
+    }
+
+    // Initialize MIDI file pad player
+    midi_pad_player = midi_file_pad_player_create();
+    if (midi_pad_player) {
+        midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
+        midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
+        midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
+    }
+
+    // Initialize pad indices array for MIDI file callbacks
+    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+        midi_pad_indices[i] = i;
     }
 
     // Init sfizz - create main synth and program synths
@@ -1314,7 +1582,7 @@ int main(int argc, char* argv[]) {
 
                     char* dir = dirname(rsx_dir);
                     char absolute_dir[1024];
-                    char* resolved = realpath(dir, absolute_dir);
+                    char* resolved = cross_platform_realpath(dir, absolute_dir);
                     const char* base_path = resolved ? absolute_dir : dir;
 
                     // Load directly using sfz_builder_load (tries string first, falls back to temp file)
@@ -1385,6 +1653,23 @@ int main(int argc, char* argv[]) {
         // Load note suppression settings from RSX
         load_note_suppression_from_rsx();
         std::cout << "Note suppression settings loaded from RSX" << std::endl;
+
+        // Load MIDI files for all configured pads
+        if (midi_pad_player) {
+            std::cout << "Loading MIDI files for pads..." << std::endl;
+            for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+                if (rsx->pads[i].midi_file[0] != '\0') {
+                    char midi_path[512];
+                    samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
+
+                    if (midi_file_pad_player_load(midi_pad_player, i, midi_path, &midi_pad_indices[i]) == 0) {
+                        std::cout << "  Pad " << (i + 1) << ": Loaded MIDI file " << midi_path << std::endl;
+                    } else {
+                        std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file " << midi_path << std::endl;
+                    }
+                }
+            }
+        }
     } else {
         // No programs defined, load single SFZ file into main synth
         std::cout << "Loading SFZ file into sfizz: " << sfz_file << std::endl;
@@ -1529,22 +1814,28 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
+        // MIDI file players are now updated in the audio callback for sample-accurate timing!
+        // This eliminates UI thread blocking and ensures perfect sync between pads.
+        // (Previously called midi_file_pad_player_update_all here in UI thread)
+
         // Update note pad fade effects
         for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+            // Fade the normal note trigger brightness (fast fade on each note)
             if (note_pad_fade[i] > 0.0f) {
-                note_pad_fade[i] -= 0.02f;
+                note_pad_fade[i] -= 0.04f;  // Fast fade on each note trigger
                 if (note_pad_fade[i] < 0.0f) note_pad_fade[i] = 0.0f;
+            }
+
+            // Fade the loop restart brightness (slower for more visibility)
+            if (note_pad_loop_fade[i] > 0.0f) {
+                note_pad_loop_fade[i] -= 0.02f;  // Slower fade for loop events
+                if (note_pad_loop_fade[i] < 0.0f) note_pad_loop_fade[i] = 0.0f;
             }
         }
 
-        // Update MIDI clock timeout (if no clock received for 1 second, mark as inactive)
-        if (midi_clock.active) {
-            uint64_t now = get_microseconds();
-            if (now - midi_clock.last_clock_time > 1000000) {  // 1 second timeout
-                midi_clock.active = false;
-                midi_clock.running = false;
-            }
-        }
+        // NO timeout for MIDI clock - once sync is established, we keep the pulse count going
+        // even if external pulses stop. Our internal clock continues, and we catch up when
+        // external sync resumes. This prevents any playback interruptions.
 
         // Main window
         ImGuiIO& io = ImGui::GetIO();
@@ -1596,55 +1887,105 @@ int main(int argc, char* argv[]) {
                         ? rsx->program_names[current_program]
                         : "";
 
-                    // Build MIDI clock info string
-                    char clock_info[64] = "";
-                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
-                        const char* transport_icon = midi_clock.running ? ">" : "||";
-                        snprintf(clock_info, sizeof(clock_info), " %s%.1f", transport_icon, midi_clock.bpm);
+                    // Build sync status and BPM display
+                    char status_info[64] = "";
+                    bool has_clock_sync = (midi_clock.active && midi_clock.bpm > 0.0f && config.midi_clock_tempo_sync == 1);
+                    bool has_spp_sync = (midi_clock.spp_synced && config.midi_spp_receive == 1);
+
+                    // Determine sync status indicators
+                    if (has_clock_sync && has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC+SPP]");
+                    } else if (has_clock_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC]");
+                    } else if (has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SPP]");
                     }
 
+                    // Format BPM - always show active playback tempo
+                    // Use '>' only when actively receiving MIDI clock
+                    char bpm_str[32];
+                    if (has_clock_sync) {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:>%.0f", active_bpm);
+                    } else {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:%.0f", active_bpm);
+                    }
+
+                    // Line 1: Program name + note info (if playing)
+                    char line1[64];
                     if (current_note >= 0) {
                         if (prog_display[0] != '\0') {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\nNote: %d Vel: %d",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d: %s N:%d V:%d",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info, current_note, current_velocity);
+                                     prog_display, current_note, current_velocity);
                         } else {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\nNote: %d Vel: %d",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d N:%d V:%d",
                                      current_program + 1, rsx->num_programs,
-                                     clock_info, current_note, current_velocity);
+                                     current_note, current_velocity);
                         }
                     } else {
                         if (prog_display[0] != '\0') {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\n[Ready]",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d: %s",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info);
+                                     prog_display);
                         } else {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\n[Ready]",
-                                     current_program + 1, rsx->num_programs,
-                                     clock_info);
+                            snprintf(line1, sizeof(line1), "Prg %d/%d",
+                                     current_program + 1, rsx->num_programs);
                         }
                     }
+
+                    // Line 2: BPM + sync status (always visible)
+                    char line2[64];
+                    if (status_info[0] != '\0') {
+                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                    } else {
+                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                    }
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
                 } else {
                     // No programs, show simple display
-                    char clock_info[64] = "";
-                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
-                        const char* transport_icon = midi_clock.running ? ">" : "||";
-                        snprintf(clock_info, sizeof(clock_info), "\n%s %.1f BPM", transport_icon, midi_clock.bpm);
+                    // Build sync status and BPM display
+                    char status_info[64] = "";
+                    bool has_clock_sync = (midi_clock.active && midi_clock.bpm > 0.0f && config.midi_clock_tempo_sync == 1);
+                    bool has_spp_sync = (midi_clock.spp_synced && config.midi_spp_receive == 1);
+
+                    // Determine sync status indicators
+                    if (has_clock_sync && has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC+SPP]");
+                    } else if (has_clock_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC]");
+                    } else if (has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SPP]");
                     }
 
-                    if (current_note >= 0) {
-                        snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\nNote: %d Vel: %d",
-                                 sfz_filename.c_str(), clock_info, current_note, current_velocity);
+                    // Format BPM - always show active playback tempo
+                    // Use '>' only when actively receiving MIDI clock
+                    char bpm_str[32];
+                    if (has_clock_sync) {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:>%.0f", active_bpm);
                     } else {
-                        snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\n[Ready]",
-                                 sfz_filename.c_str(), clock_info);
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:%.0f", active_bpm);
                     }
+
+                    // Line 1: File name + note info (if playing)
+                    char line1[64];
+                    if (current_note >= 0) {
+                        snprintf(line1, sizeof(line1), "File: %s N:%d V:%d",
+                                 sfz_filename.c_str(), current_note, current_velocity);
+                    } else {
+                        snprintf(line1, sizeof(line1), "File: %s",
+                                 sfz_filename.c_str());
+                    }
+
+                    // Line 2: BPM + sync status (always visible)
+                    char line2[64];
+                    if (status_info[0] != '\0') {
+                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                    } else {
+                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                    }
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
                 }
                 lcd_write(lcd_display, lcd_text);
 
@@ -2182,7 +2523,8 @@ int main(int argc, char* argv[]) {
                             if (col > 0) ImGui::SameLine();
 
                             bool is_selected = (selected_pad == pad_idx);
-                            bool is_configured = (rsx->pads[pad_idx].note >= 0);
+                            bool is_configured = (rsx->pads[pad_idx].enabled &&
+                                                 (rsx->pads[pad_idx].note >= 0 || rsx->pads[pad_idx].midi_file[0] != '\0'));
 
                             ImVec4 btn_col = is_selected ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) :
                                             (is_configured ? ImVec4(0.26f, 0.27f, 0.30f, 1.0f) :
@@ -2267,6 +2609,70 @@ int main(int argc, char* argv[]) {
                             pad->program = current_item - 1;  // 0 becomes -1 (No program), 1 becomes 0 (Prog 1), etc.
                             rsx_changed = true;
                         }
+                    }
+
+                    // MIDI File path (optional - for playing MIDI files instead of single notes)
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    ImGui::Text("MIDI File Playback (optional):");
+                    ImGui::TextWrapped("Leave empty to trigger a single note. Set a MIDI file path to play that file when pad is triggered.");
+
+                    // Use InputText with EnterReturnsTrue flag to only load on Enter or focus lost
+                    if (ImGui::InputText("MIDI File Path", pad->midi_file, sizeof(pad->midi_file), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                        rsx_changed = true;
+
+                        // Load MIDI file only when Enter is pressed or focus is lost
+                        if (midi_pad_player && pad->midi_file[0] != '\0') {
+                            // Enable the pad when MIDI file is set
+                            if (!pad->enabled) {
+                                pad->enabled = 1;
+                                std::cout << "Auto-enabled pad " << (selected_pad + 1) << " for MIDI file playback" << std::endl;
+                            }
+
+                            // Get full path relative to RSX file
+                            char midi_path[512];
+                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
+
+                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
+                            } else {
+                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                            }
+                        }
+                    }
+                    // Mark RSX as changed if text was deactivated (focus lost)
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        rsx_changed = true;
+
+                        // Also load on focus lost
+                        if (midi_pad_player && pad->midi_file[0] != '\0') {
+                            char midi_path[512];
+                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
+
+                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
+                            } else {
+                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                            }
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear")) {
+                        pad->midi_file[0] = '\0';
+                        rsx_changed = true;
+
+                        // Unload MIDI file
+                        if (midi_pad_player) {
+                            midi_file_pad_player_unload(midi_pad_player, selected_pad);
+                        }
+                    }
+
+                    // Show status if MIDI file is set
+                    if (pad->midi_file[0] != '\0') {
+                        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "MIDI file configured: %s", pad->midi_file);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Single note mode (no MIDI file)");
                     }
 
                     // Autosave RSX if any changes were made
@@ -2604,6 +3010,46 @@ int main(int argc, char* argv[]) {
                         mixer.playback_mute = !mixer.playback_mute;
                     }
                     ImGui::PopStyleColor();
+
+                    ImGui::EndGroup();
+                    col_index++;
+                }
+
+                // TEMPO slider (for MIDI file playback)
+                {
+                    float colX = origin.x + col_index * (sliderW + spacing);
+                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
+                    ImGui::BeginGroup();
+                    ImGui::Text("TEMPO");
+                    ImGui::Dummy(ImVec2(0, 4.0f));
+
+                    // Spacer to match other channels (no FX button)
+                    ImGui::Dummy(ImVec2(0, SOLO_SIZE + 2.0f));
+
+                    // Spacer to match pan slider position (20.0f pan slider height)
+                    ImGui::Dummy(ImVec2(sliderW, 20.0f));
+                    ImGui::Dummy(ImVec2(0, 2.0f));
+
+                    // Tempo slider (50 BPM to 200 BPM)
+                    // Up = faster (200), Down = slower (50)
+                    float prev_tempo = tempo_bpm;
+                    if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
+                        if (prev_tempo != tempo_bpm && midi_pad_player) {
+                            // Update MIDI file player tempo and active BPM
+                            active_bpm = tempo_bpm;
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        }
+                    }
+                    ImGui::Dummy(ImVec2(0, 8.0f));
+
+                    // Reset button (reset to default 125 BPM)
+                    if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
+                        tempo_bpm = 125.0f;
+                        if (midi_pad_player) {
+                            active_bpm = tempo_bpm;
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        }
+                    }
 
                     ImGui::EndGroup();
                     col_index++;
@@ -3194,17 +3640,29 @@ int main(int argc, char* argv[]) {
 
                         // Get pad configuration (may be null if no RSX loaded)
                         NoteTriggerPad* pad = (rsx && pad_idx < rsx->num_pads) ? &rsx->pads[pad_idx] : nullptr;
-                        bool pad_configured = (pad && pad->note >= 0 && pad->enabled);
+                        bool pad_configured = (pad && pad->enabled && (pad->note >= 0 || pad->midi_file[0] != '\0'));
 
-                        // Pad button with fade effect
-                        float fade = note_pad_fade[pad_idx];
+                        // Pad button with fade effect (inspired by regroove visual feedback)
+                        float note_brightness = note_pad_fade[pad_idx];        // White/bright on note triggers
+                        float loop_brightness = note_pad_loop_fade[pad_idx];    // Blue/cyan on loop restarts
                         ImVec4 pad_col;
-                        if (fade > 0.0f) {
-                            // Active (red with fade)
-                            pad_col = ImVec4(0.90f * fade + 0.26f * (1.0f - fade),
-                                           0.15f * fade + 0.27f * (1.0f - fade),
-                                           0.18f * fade + 0.30f * (1.0f - fade),
-                                           1.0f);
+
+                        if (loop_brightness > 0.0f) {
+                            // Loop restart - blue/cyan blink (like regroove transition fade)
+                            pad_col = ImVec4(
+                                0.26f + loop_brightness * 0.15f,
+                                0.27f + loop_brightness * 0.45f,  // More green for cyan
+                                0.30f + loop_brightness * 0.60f,  // Strong blue
+                                1.0f
+                            );
+                        } else if (note_brightness > 0.0f) {
+                            // Note trigger - white/bright blink (like regroove trigger fade)
+                            pad_col = ImVec4(
+                                0.26f + note_brightness * 0.64f,  // Add white
+                                0.27f + note_brightness * 0.63f,
+                                0.30f + note_brightness * 0.60f,
+                                1.0f
+                            );
                         } else if (!pad_configured) {
                             // Not configured (darker gray)
                             pad_col = ImVec4(0.16f, 0.17f, 0.18f, 1.0f);
@@ -3219,37 +3677,79 @@ int main(int argc, char* argv[]) {
                         // Pad label
                         char pad_label[128];
                         if (pad_configured) {
-                            // Show program assignment if pad is assigned to a specific program
-                            if (pad->program >= 0 && pad->program < rsx->num_programs) {
-                                const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
-                                    ? rsx->program_names[pad->program]
-                                    : "";
-                                if (assigned_prog_name[0] != '\0') {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n%s",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            assigned_prog_name);
+                            // Check if this is a MIDI file pad or single note pad
+                            if (pad->midi_file[0] != '\0') {
+                                // MIDI file mode - show filename and program
+                                // Extract just the filename from the path
+                                const char* filename = strrchr(pad->midi_file, '/');
+                                if (!filename) filename = strrchr(pad->midi_file, '\\');
+                                if (!filename) filename = pad->midi_file;
+                                else filename++;  // Skip the slash
+
+                                if (pad->program >= 0 && pad->program < rsx->num_programs) {
+                                    const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
+                                        ? rsx->program_names[pad->program]
+                                        : "";
+                                    if (assigned_prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n%s",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                assigned_prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\nPrg %d",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                pad->program + 1);
+                                    }
                                 } else {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\nPrg %d",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            pad->program + 1);
+                                    const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
+                                        ? rsx->program_names[current_program]
+                                        : "";
+                                    if (prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n[%s]",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\n%s\n[Prg %d]",
+                                                pad->description[0] ? pad->description : "",
+                                                filename,
+                                                current_program + 1);
+                                    }
                                 }
                             } else {
-                                // No specific program: show current UI program in brackets
-                                const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
-                                    ? rsx->program_names[current_program]
-                                    : "";
-                                if (prog_name[0] != '\0') {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[%s]",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            prog_name);
+                                // Single note mode - show note and program
+                                if (pad->program >= 0 && pad->program < rsx->num_programs) {
+                                    const char* assigned_prog_name = (rsx->program_names[pad->program][0] != '\0')
+                                        ? rsx->program_names[pad->program]
+                                        : "";
+                                    if (assigned_prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n%s",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                assigned_prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\nPrg %d",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                pad->program + 1);
+                                    }
                                 } else {
-                                    snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[Prg %d]",
-                                            pad->description[0] ? pad->description : "",
-                                            pad->note,
-                                            current_program + 1);
+                                    // No specific program: show current UI program in brackets
+                                    const char* prog_name = (rsx && current_program < rsx->num_programs && rsx->program_names[current_program][0] != '\0')
+                                        ? rsx->program_names[current_program]
+                                        : "";
+                                    if (prog_name[0] != '\0') {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[%s]",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                prog_name);
+                                    } else {
+                                        snprintf(pad_label, sizeof(pad_label), "%s\nNote %d\n[Prg %d]",
+                                                pad->description[0] ? pad->description : "",
+                                                pad->note,
+                                                current_program + 1);
+                                    }
                                 }
                             }
                         } else {
@@ -3260,42 +3760,88 @@ int main(int argc, char* argv[]) {
 
                         bool is_active = ImGui::IsItemActive();
                         bool was_held = (held_pad_index == pad_idx);
+                        bool just_clicked = ImGui::IsItemClicked();
 
-                        if (is_active && !was_held && pad_configured && !learn_mode_active) {
-                            // Button just pressed - send note_on
+                        // For MIDI file pads, use click detection; for regular pads, use active state
+                        bool should_trigger = pad_configured && !learn_mode_active &&
+                                            ((pad->midi_file[0] != '\0' && just_clicked) ||
+                                             (pad->midi_file[0] == '\0' && is_active && !was_held));
+
+                        if (should_trigger) {
+                            // Button just pressed
                             int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
-                            // Determine which synth to use based on pad's program setting
-                            int target_prog = current_program;
-                            sfizz_synth_t* target_synth = nullptr;
-                            int actual_program = target_prog;
+                            // Check if pad has MIDI file configured
+                            if (midi_pad_player && pad->midi_file[0] != '\0') {
+                                // Check if already playing
+                                if (midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) {
+                                    // Already playing - stop it
+                                    // std::cout << "=== STOPPING MIDI FILE for pad " << (pad_idx + 1) << " ===" << std::endl;
+                                    midi_file_pad_player_stop(midi_pad_player, pad_idx);
+                                    note_pad_fade[pad_idx] = 0.0f;
+                                } else {
+                                    // Not playing - start/retrigger MIDI file playback
+                                    std::cout << "=== TRIGGERING PAD " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                    std::cout << "  midi_clock.active=" << midi_clock.active << std::endl;
+                                    std::cout << "  midi_clock.running=" << midi_clock.running << std::endl;
+                                    std::cout << "  midi_clock.total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
 
-                            if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
-                                target_synth = program_synths[pad->program];
-                                actual_program = pad->program;
+                                    // Use quantized trigger if MIDI clock is active, otherwise trigger immediately
+                                    // Quantization ensures the pad starts on a beat boundary aligned with SPP
+                                    if (midi_clock.active && midi_clock.running) {
+                                        // MIDI clock active - use quantized trigger for beat-aligned playback
+                                        std::cout << "  MIDI Clock active: using quantized trigger" << std::endl;
+                                        std::cout << "  Current pulse: " << midi_clock.total_pulse_count << std::endl;
+                                        std::cout << "  Quantize beats: " << midi_quantize_beats << std::endl;
+                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx,
+                                                                               midi_clock.total_pulse_count,
+                                                                               midi_quantize_beats);
+                                        note_pad_fade[pad_idx] = 0.5f;  // Dim blink to show it's scheduled
+                                    } else {
+                                        // No MIDI clock - trigger immediately
+                                        std::cout << "  No MIDI clock: triggering immediately" << std::endl;
+                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                        note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
+                                    }
+                                }
+
+                                // Mark as held to prevent retriggering while mouse is down (MIDI file pads only)
+                                // DON'T set held_pad_index here - that's for regular note pads with note-off!
+                                // held_pad_index = pad_idx;  // REMOVED - causes issues with note-off for regular pads
                             } else {
-                                target_synth = program_synths[target_prog];
-                            }
+                                // Regular single note trigger
+                                // Determine which synth to use based on pad's program setting
+                                int target_prog = current_program;
+                                sfizz_synth_t* target_synth = nullptr;
+                                int actual_program = target_prog;
 
-                            std::lock_guard<std::mutex> lock(synth_mutex);
-                            if (target_synth) {
-                                sfizz_send_note_on(target_synth, 0, pad->note, velocity);
+                                if (pad->program >= 0 && pad->program < rsx->num_programs && program_synths[pad->program]) {
+                                    target_synth = program_synths[pad->program];
+                                    actual_program = pad->program;
+                                } else {
+                                    target_synth = program_synths[target_prog];
+                                }
 
-                                // Track which pad/note is held for note_off on release
-                                held_pad_index = pad_idx;
-                                held_pad_note = pad->note;
-                                held_pad_synth = target_synth;
+                                std::lock_guard<std::mutex> lock(synth_mutex);
+                                if (target_synth) {
+                                    sfizz_send_note_on(target_synth, 0, pad->note, velocity);
 
-                                current_note = pad->note;
-                                current_velocity = velocity;
+                                    // Track which pad/note is held for note_off on release
+                                    held_pad_index = pad_idx;
+                                    held_pad_note = pad->note;
+                                    held_pad_synth = target_synth;
 
-                                // Highlight ALL pads that would play this same note on this program
-                                for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
-                                    NoteTriggerPad* check_pad = &rsx->pads[i];
-                                    if (check_pad->enabled && check_pad->note == pad->note) {
-                                        int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
-                                        if (check_pad_program == actual_program) {
-                                            note_pad_fade[i] = 1.0f;
+                                    current_note = pad->note;
+                                    current_velocity = velocity;
+
+                                    // Highlight ALL pads that would play this same note on this program
+                                    for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
+                                        NoteTriggerPad* check_pad = &rsx->pads[i];
+                                        if (check_pad->enabled && check_pad->note == pad->note) {
+                                            int check_pad_program = (check_pad->program >= 0) ? check_pad->program : target_prog;
+                                            if (check_pad_program == actual_program) {
+                                                note_pad_fade[i] = 1.0f;
+                                            }
                                         }
                                     }
                                 }
@@ -3670,6 +4216,66 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
+                // MIDI SYNC SETTINGS
+                ImGui::Text("MIDI CLOCK SYNC:");
+                ImGui::Spacing();
+
+                // MIDI Clock Tempo Sync
+                bool midi_clock_tempo_sync = (config.midi_clock_tempo_sync == 1);
+                if (ImGui::Checkbox("Sync Playback Tempo to MIDI Clock", &midi_clock_tempo_sync)) {
+                    config.midi_clock_tempo_sync = midi_clock_tempo_sync ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When enabled, MIDI file playback tempo follows external MIDI clock");
+
+                ImGui::Spacing();
+
+                // MIDI SPP Receive
+                bool midi_spp_receive = (config.midi_spp_receive == 1);
+                if (ImGui::Checkbox("Receive Song Position Pointer (SPP)", &midi_spp_receive)) {
+                    config.midi_spp_receive = midi_spp_receive ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When enabled, sync playback position to external MIDI clock");
+
+                ImGui::Spacing();
+
+                // MIDI Clock Quantization
+                ImGui::Text("MIDI Clock Quantization:");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "When MIDI Clock is active, pads trigger on beat boundaries");
+                ImGui::Spacing();
+
+                const char* quantize_options[] = {
+                    "1 Beat (Quarter Note)",
+                    "2 Beats (Half Note)",
+                    "4 Beats (One Bar - 4/4)",
+                    "8 Beats (Two Bars)"
+                };
+                int quantize_index = 0;
+                if (midi_quantize_beats == 1) quantize_index = 0;
+                else if (midi_quantize_beats == 2) quantize_index = 1;
+                else if (midi_quantize_beats == 4) quantize_index = 2;
+                else if (midi_quantize_beats == 8) quantize_index = 3;
+
+                if (ImGui::Combo("Quantize To", &quantize_index, quantize_options, 4)) {
+                    switch(quantize_index) {
+                        case 0: midi_quantize_beats = 1; break;
+                        case 1: midi_quantize_beats = 2; break;
+                        case 2: midi_quantize_beats = 4; break;
+                        case 3: midi_quantize_beats = 8; break;
+                    }
+                    config.midi_quantize_beats = midi_quantize_beats;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+
+                ImGui::Spacing();
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 // MIDI mappings display
                 if (input_mappings) {
                     ImGui::Text("MIDI Mappings: %d", input_mappings->midi_count);
@@ -3763,9 +4369,45 @@ int main(int argc, char* argv[]) {
                     ImGui::Spacing();
                     ImGui::Text("Use LEARN mode to create new MIDI mappings");
                 }
+
+                // MIDI Sync Settings
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Text("MIDI SYNC SETTINGS");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Tempo sync toggle
+                bool tempo_sync = (config.midi_clock_tempo_sync == 1);
+                if (ImGui::Checkbox("Sync tempo to MIDI Clock", &tempo_sync)) {
+                    config.midi_clock_tempo_sync = tempo_sync ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("When ENABLED: MIDI file playback tempo adjusts to match incoming MIDI Clock.\n"
+                                      "When DISABLED: Incoming tempo is shown in LCD but doesn't affect playback (visual only).");
+                }
+
+                ImGui::Spacing();
+
+                // SPP receive toggle
+                bool spp_receive = (config.midi_spp_receive == 1);
+                if (ImGui::Checkbox("Sync position to MIDI SPP", &spp_receive)) {
+                    config.midi_spp_receive = spp_receive ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("When ENABLED: Incoming MIDI Song Position Pointer messages sync playback position.\n"
+                                      "When DISABLED: SPP messages are ignored (only tempo sync).");
+                }
             }
             else if (ui_mode == UI_MODE_SETTINGS) {
-                // SETTINGS MODE: Audio device configuration
+                // SETTINGS MODE: Audio configuration
                 ImGui::Text("AUDIO SETTINGS");
                 ImGui::Separator();
                 ImGui::Spacing();
@@ -3894,6 +4536,9 @@ int main(int argc, char* argv[]) {
         if (effects_program[i]) {
             regroove_effects_destroy(effects_program[i]);
         }
+    }
+    if (midi_pad_player) {
+        midi_file_pad_player_destroy(midi_pad_player);
     }
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);

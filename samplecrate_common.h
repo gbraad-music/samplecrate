@@ -39,6 +39,11 @@ typedef struct {
     int lock_ui_program_selection;  // 0 = allow UI control, 1 = lock to MIDI only
     int midi_program_change_enabled[3];  // Per-device: 0 = ignore (UI selection leads), 1 = receive but don't change UI
 
+    // MIDI sync settings
+    int midi_clock_tempo_sync;  // 0 = disabled (visual only), 1 = enabled (adjust playback tempo)
+    int midi_spp_receive;       // 0 = disabled (ignore SPP), 1 = enabled (sync to SPP)
+    int midi_quantize_beats;    // Quantize trigger to N beats (1, 2, 4, 8)
+
     // Mixer defaults
     float default_master_volume;
     float default_master_pan;
