@@ -148,8 +148,8 @@ int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, in
     // Calculate the next quantized beat
     int next_beat = ((current_beat / quantize_beats) + 1) * quantize_beats;
 
-    std::cout << "midi_file_player_play_quantized: Scheduling playback for beat " << next_beat
-              << " (current=" << current_beat << ", quantize=" << quantize_beats << ")" << std::endl;
+    // std::cout << "midi_file_player_play_quantized: Scheduling playback for beat " << next_beat
+    //           << " (current=" << current_beat << ", quantize=" << quantize_beats << ")" << std::endl;
 
     player->playing = false;  // Not playing yet
     player->scheduled = true;
@@ -236,16 +236,16 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // Check if we're scheduled to start and the beat has arrived
     if (player->scheduled && current_beat >= 0) {
         if (current_beat >= player->scheduled_start_beat) {
-            std::cout << "midi_file_player_update: Starting scheduled playback on pulse " << current_beat
-                      << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
+            // std::cout << "midi_file_player_update: Starting scheduled playback on pulse " << current_beat
+            //           << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
             player->scheduled = false;
             player->scheduled_start_beat = -1;
             player->playing = true;
             player->start_beat = current_beat;
             player->position_seconds = 0.0f;
 
-            std::cout << "  Initial state: start_beat=" << player->start_beat
-                      << " position=" << player->position_seconds << "s" << std::endl;
+            // std::cout << "  Initial state: start_beat=" << player->start_beat
+            //           << " position=" << player->position_seconds << "s" << std::endl;
         } else {
             // Still waiting for the scheduled beat
             return;
@@ -262,12 +262,12 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // Note: current_beat is actually total_pulse_count (24 pulses per quarter note)
 
     // Debug: Log when we enter fallback mode on first frame
-    static bool logged_mode = false;
-    if (!logged_mode) {
-        std::cout << "MIDI FILE PLAYER: current_beat=" << current_beat
-                  << " (using " << (current_beat >= 0 ? "MIDI CLOCK SYNC" : "FALLBACK MODE") << ")" << std::endl;
-        logged_mode = true;
-    }
+    // static bool logged_mode = false;
+    // if (!logged_mode) {
+    //     std::cout << "MIDI FILE PLAYER: current_beat=" << current_beat
+    //               << " (using " << (current_beat >= 0 ? "MIDI CLOCK SYNC" : "FALLBACK MODE") << ")" << std::endl;
+    //     logged_mode = true;
+    // }
 
     if (current_beat >= 0) {
         // First update: record start pulse count
@@ -387,17 +387,18 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
             last_tick = player->events.back().tick;
         }
 
-        auto now = std::chrono::high_resolution_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::cout << "[" << ms << "] WRAP EVENTS old_tick=" << old_tick
-                  << " last_tick=" << last_tick << " new_tick=" << new_tick << std::endl;
+        // Debug wrap events
+        // auto now = std::chrono::high_resolution_clock::now();
+        // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        // std::cout << "[" << ms << "] WRAP EVENTS old_tick=" << old_tick
+        //           << " last_tick=" << last_tick << " new_tick=" << new_tick << std::endl;
 
         // Fire events from old_tick to end of file
-        std::cout << "[WRAP PART 1] Firing events from " << old_tick << " to " << last_tick << std::endl;
+        // std::cout << "[WRAP PART 1] Firing events from " << old_tick << " to " << last_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick > old_tick && evt.tick <= last_tick) {
-                std::cout << "  [WRAP1] tick=" << evt.tick << " note=" << evt.note
-                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
+                // std::cout << "  [WRAP1] tick=" << evt.tick << " note=" << evt.note
+                //           << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -413,11 +414,11 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         }
 
         // Fire events from beginning to new_tick (use >= to include tick 0)
-        std::cout << "[WRAP PART 2] Firing events from 0 to " << new_tick << std::endl;
+        // std::cout << "[WRAP PART 2] Firing events from 0 to " << new_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick >= 0 && evt.tick <= new_tick) {
-                std::cout << "  [WRAP2] tick=" << evt.tick << " note=" << evt.note
-                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
+                // std::cout << "  [WRAP2] tick=" << evt.tick << " note=" << evt.note
+                //           << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -438,13 +439,13 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         for (const MidiEventState& evt : player->events) {
             if (evt.tick > old_tick && evt.tick <= new_tick) {
                 // Debug: Log every note event fired
-                auto now = std::chrono::high_resolution_clock::now();
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                std::cout << "[" << ms << "] FIRE_EVENT tick=" << evt.tick
-                          << " (range " << old_tick << "-" << new_tick << ")"
-                          << " note=" << evt.note << " vel=" << evt.velocity
-                          << " " << (evt.on ? "ON" : "OFF")
-                          << " pos=" << player->position_seconds << "s" << std::endl;
+                // auto now = std::chrono::high_resolution_clock::now();
+                // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                // std::cout << "[" << ms << "] FIRE_EVENT tick=" << evt.tick
+                //           << " (range " << old_tick << "-" << new_tick << ")"
+                //           << " note=" << evt.note << " vel=" << evt.velocity
+                //           << " " << (evt.on ? "ON" : "OFF")
+                //           << " pos=" << player->position_seconds << "s" << std::endl;
 
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 

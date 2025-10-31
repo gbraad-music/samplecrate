@@ -1010,13 +1010,13 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         // (-1 if no MIDI clock)
 
         // Debug MIDI clock state once
-        static bool logged_clock_state = false;
-        if (!logged_clock_state) {
-            std::cout << "=== SAMPLECRATE BUILD v2025-10-31_fix-wrap-duplicates ===" << std::endl;
-            std::cout << "AUDIO CALLBACK: midi_clock.active=" << midi_clock.active
-                      << " total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
-            logged_clock_state = true;
-        }
+        // static bool logged_clock_state = false;
+        // if (!logged_clock_state) {
+        //     std::cout << "=== SAMPLECRATE BUILD v2025-10-31_fix-wrap-duplicates ===" << std::endl;
+        //     std::cout << "AUDIO CALLBACK: midi_clock.active=" << midi_clock.active
+        //               << " total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
+        //     logged_clock_state = true;
+        // }
 
         // Use MIDI clock sync if active (don't require 'running' since regroove doesn't send Start/Stop)
         int current_beat = midi_clock.active ? midi_clock.total_pulse_count : -1;
@@ -3592,12 +3592,12 @@ int main(int argc, char* argv[]) {
                                 // Check if already playing
                                 if (midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) {
                                     // Already playing - stop it
-                                    std::cout << "=== STOPPING MIDI FILE for pad " << (pad_idx + 1) << " ===" << std::endl;
+                                    // std::cout << "=== STOPPING MIDI FILE for pad " << (pad_idx + 1) << " ===" << std::endl;
                                     midi_file_pad_player_stop(midi_pad_player, pad_idx);
                                     note_pad_fade[pad_idx] = 0.0f;
                                 } else {
                                     // Not playing - start/retrigger MIDI file playback
-                                    std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
+                                    // std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
 
                                     // Use quantized trigger if MIDI clock is active, otherwise immediate
                                     // Note: We only check midi_clock.active (not running) because regroove doesn't send Start/Stop
@@ -3608,13 +3608,13 @@ int main(int argc, char* argv[]) {
                                         int current_pulse = midi_clock.total_pulse_count;
                                         int quantize_pulses = 24;  // 24 pulses = 1 quarter note
 
-                                        std::cout << "  Using MIDI clock quantization: current_pulse=" << current_pulse
-                                                  << " (quarter_note=" << (current_pulse / 24.0f)
-                                                  << ") quantize=24 pulses BPM=" << midi_clock.bpm << std::endl;
+                                        // std::cout << "  Using MIDI clock quantization: current_pulse=" << current_pulse
+                                        //           << " (quarter_note=" << (current_pulse / 24.0f)
+                                        //           << ") quantize=24 pulses BPM=" << midi_clock.bpm << std::endl;
                                         midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx, current_pulse, quantize_pulses);
                                     } else {
                                         // No MIDI clock - trigger immediately (NOT SYNCED!)
-                                        std::cout << "  WARNING: No MIDI clock - triggering immediately (will drift!)" << std::endl;
+                                        // std::cout << "  WARNING: No MIDI clock - triggering immediately (will drift!)" << std::endl;
                                         midi_file_pad_player_trigger(midi_pad_player, pad_idx);
                                     }
                                     note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
