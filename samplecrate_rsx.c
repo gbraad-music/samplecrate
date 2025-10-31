@@ -296,12 +296,12 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                         strncpy(rsx->program_names[prog_idx], value, sizeof(rsx->program_names[prog_idx]) - 1);
                         rsx->program_names[prog_idx][sizeof(rsx->program_names[prog_idx]) - 1] = '\0';
                         printf("DEBUG: Stored program %d name: '%s'\n", prog_num, rsx->program_names[prog_idx]);
-                    } else if (strstr(key, "_volume") != NULL) {
-                        // prog_N_volume
+                    } else if (strstr(key, "_volume") != NULL && strstr(key, "_sample_") == NULL) {
+                        // prog_N_volume (but NOT prog_N_sample_M_volume)
                         rsx->program_volumes[prog_idx] = atof(value);
                         printf("DEBUG: Stored program %d volume: %.3f\n", prog_num, rsx->program_volumes[prog_idx]);
-                    } else if (strstr(key, "_pan") != NULL) {
-                        // prog_N_pan
+                    } else if (strstr(key, "_pan") != NULL && strstr(key, "_sample_") == NULL) {
+                        // prog_N_pan (but NOT prog_N_sample_M_pan)
                         rsx->program_pans[prog_idx] = atof(value);
                         printf("DEBUG: Stored program %d pan: %.3f\n", prog_num, rsx->program_pans[prog_idx]);
                     } else if (strstr(key, "_fx_enable") != NULL) {
