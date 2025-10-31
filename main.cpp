@@ -1084,10 +1084,13 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     }
 
     // Apply playback volume and pan
+    // Pan: 0.0 = left, 0.5 = center (both at 100%), 1.0 = right
     float playback_vol = mixer.playback_mute ? 0.0f : mixer.playback_volume;
     float playback_pan = mixer.playback_pan;
-    float playback_left_gain = playback_vol * (1.0f - playback_pan);
-    float playback_right_gain = playback_vol * playback_pan;
+
+    // Constant-power panning: center should be full volume on both channels
+    float playback_left_gain = playback_vol * (playback_pan <= 0.5f ? 1.0f : (1.0f - (playback_pan - 0.5f) * 2.0f));
+    float playback_right_gain = playback_vol * (playback_pan >= 0.5f ? 1.0f : (playback_pan * 2.0f));
 
     for (int i = 0; i < frames; i++) {
         left[i] *= playback_left_gain;
@@ -1097,8 +1100,10 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     // Apply master volume and pan
     float master_vol = mixer.master_mute ? 0.0f : mixer.master_volume;
     float master_pan = mixer.master_pan;
-    float master_left_gain = master_vol * (1.0f - master_pan);
-    float master_right_gain = master_vol * master_pan;
+
+    // Constant-power panning: center should be full volume on both channels
+    float master_left_gain = master_vol * (master_pan <= 0.5f ? 1.0f : (1.0f - (master_pan - 0.5f) * 2.0f));
+    float master_right_gain = master_vol * (master_pan >= 0.5f ? 1.0f : (master_pan * 2.0f));
 
     for (int i = 0; i < frames; i++) {
         left[i] *= master_left_gain;
