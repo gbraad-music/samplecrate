@@ -82,7 +82,8 @@ int midi_pad_indices[RSX_MAX_NOTE_PADS];
 int midi_quantize_beats = 1;  // Quantize to this many beats (1=quarter, 2=half, 4=bar)
 
 // Tempo control (for MIDI file playback)
-float tempo_bpm = 125.0f;  // Default BPM
+float tempo_bpm = 125.0f;  // Manual tempo slider value
+float active_bpm = 125.0f;  // Actual playback tempo (updated by MIDI clock or manual slider)
 
 // Note pad visual feedback
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
@@ -763,7 +764,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                     // This prevents constant tiny adjustments that cause timing glitches
                     if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
                         midi_clock.bpm = new_bpm;
-                        midi_file_pad_player_set_tempo(midi_pad_player, midi_clock.bpm);
+                        // Only adjust playback tempo if sync is enabled
+                        if (config.midi_clock_tempo_sync == 1) {
+                            active_bpm = midi_clock.bpm;  // Update active playback tempo
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        }
                     } else {
                         midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
                     }
@@ -800,16 +805,23 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         // Position is in "MIDI beats" (1/16th notes from start of song)
         int spp_position = data1 | (data2 << 7);
         midi_clock.spp_position = spp_position;
-        midi_clock.spp_synced = true;
 
-        // Convert SPP (16th notes) to quarter note beats
-        // SPP counts 16th notes, so divide by 4 to get quarter notes
-        // But also account for the fact that we might be mid-pattern
-        // For now, just sync to the SPP position directly
-        midi_clock.beat_count = spp_position / 4;  // Convert 16th notes to quarter notes
+        // Only sync position if SPP receive is enabled
+        if (config.midi_spp_receive == 1) {
+            midi_clock.spp_synced = true;
 
-        std::cout << "MIDI SPP received: position=" << spp_position
-                  << " (16th notes), beat=" << midi_clock.beat_count << std::endl;
+            // Convert SPP (16th notes) to quarter note beats
+            // SPP counts 16th notes, so divide by 4 to get quarter notes
+            // But also account for the fact that we might be mid-pattern
+            // For now, just sync to the SPP position directly
+            midi_clock.beat_count = spp_position / 4;  // Convert 16th notes to quarter notes
+
+            std::cout << "MIDI SPP received: position=" << spp_position
+                      << " (16th notes), beat=" << midi_clock.beat_count << std::endl;
+        } else {
+            std::cout << "MIDI SPP received but IGNORED (disabled in settings): position="
+                      << spp_position << std::endl;
+        }
         return;
     }
 
@@ -1025,9 +1037,9 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         //     logged_clock_state = true;
         // }
 
-        // Use MIDI clock sync if active (don't require 'running' since regroove doesn't send Start/Stop)
-        int current_beat = midi_clock.active ? midi_clock.total_pulse_count : -1;
-        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_beat);
+        // Always use internal time (-1) for playback - MIDI clock only adjusts tempo, doesn't control time
+        // This ensures playback continues even when MIDI clock pulses stop
+        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, -1);
     }
 
     std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1746,14 +1758,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Update MIDI clock timeout (if no clock received for 1 second, mark as inactive)
-        if (midi_clock.active) {
-            uint64_t now = get_microseconds();
-            if (now - midi_clock.last_clock_time > 1000000) {  // 1 second timeout
-                midi_clock.active = false;
-                midi_clock.running = false;
-            }
-        }
+        // NO timeout for MIDI clock - once sync is established, we keep the pulse count going
+        // even if external pulses stop. Our internal clock continues, and we catch up when
+        // external sync resumes. This prevents any playback interruptions.
 
         // Main window
         ImGuiIO& io = ImGui::GetIO();
@@ -1805,55 +1812,105 @@ int main(int argc, char* argv[]) {
                         ? rsx->program_names[current_program]
                         : "";
 
-                    // Build MIDI clock info string
-                    char clock_info[64] = "";
-                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
-                        const char* transport_icon = midi_clock.running ? ">" : "||";
-                        snprintf(clock_info, sizeof(clock_info), " %s%.1f", transport_icon, midi_clock.bpm);
+                    // Build sync status and BPM display
+                    char status_info[64] = "";
+                    bool has_clock_sync = (midi_clock.active && midi_clock.bpm > 0.0f && config.midi_clock_tempo_sync == 1);
+                    bool has_spp_sync = (midi_clock.spp_synced && config.midi_spp_receive == 1);
+
+                    // Determine sync status indicators
+                    if (has_clock_sync && has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC+SPP]");
+                    } else if (has_clock_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC]");
+                    } else if (has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SPP]");
                     }
 
+                    // Format BPM - always show active playback tempo
+                    // Use '>' only when actively receiving MIDI clock
+                    char bpm_str[32];
+                    if (has_clock_sync) {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:>%.0f", active_bpm);
+                    } else {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:%.0f", active_bpm);
+                    }
+
+                    // Line 1: Program name + note info (if playing)
+                    char line1[64];
                     if (current_note >= 0) {
                         if (prog_display[0] != '\0') {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\nNote: %d Vel: %d BPM:%.0f",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d: %s N:%d V:%d",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info, current_note, current_velocity, tempo_bpm);
+                                     prog_display, current_note, current_velocity);
                         } else {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\nNote: %d Vel: %d BPM:%.0f",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d N:%d V:%d",
                                      current_program + 1, rsx->num_programs,
-                                     clock_info, current_note, current_velocity, tempo_bpm);
+                                     current_note, current_velocity);
                         }
                     } else {
                         if (prog_display[0] != '\0') {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d: %s%s\n[Ready] BPM:%.0f",
+                            snprintf(line1, sizeof(line1), "Prg %d/%d: %s",
                                      current_program + 1, rsx->num_programs,
-                                     prog_display, clock_info, tempo_bpm);
+                                     prog_display);
                         } else {
-                            snprintf(lcd_text, sizeof(lcd_text),
-                                     "Prg %d/%d%s\n[Ready] BPM:%.0f",
-                                     current_program + 1, rsx->num_programs,
-                                     clock_info, tempo_bpm);
+                            snprintf(line1, sizeof(line1), "Prg %d/%d",
+                                     current_program + 1, rsx->num_programs);
                         }
                     }
+
+                    // Line 2: BPM + sync status (always visible)
+                    char line2[64];
+                    if (status_info[0] != '\0') {
+                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                    } else {
+                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                    }
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
                 } else {
                     // No programs, show simple display
-                    char clock_info[64] = "";
-                    if (midi_clock.active && midi_clock.bpm > 0.0f) {
-                        const char* transport_icon = midi_clock.running ? ">" : "||";
-                        snprintf(clock_info, sizeof(clock_info), "\n%s %.1f BPM", transport_icon, midi_clock.bpm);
+                    // Build sync status and BPM display
+                    char status_info[64] = "";
+                    bool has_clock_sync = (midi_clock.active && midi_clock.bpm > 0.0f && config.midi_clock_tempo_sync == 1);
+                    bool has_spp_sync = (midi_clock.spp_synced && config.midi_spp_receive == 1);
+
+                    // Determine sync status indicators
+                    if (has_clock_sync && has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC+SPP]");
+                    } else if (has_clock_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SYNC]");
+                    } else if (has_spp_sync) {
+                        snprintf(status_info, sizeof(status_info), "[SPP]");
                     }
 
-                    if (current_note >= 0) {
-                        snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\nNote: %d Vel: %d BPM:%.0f",
-                                 sfz_filename.c_str(), clock_info, current_note, current_velocity, tempo_bpm);
+                    // Format BPM - always show active playback tempo
+                    // Use '>' only when actively receiving MIDI clock
+                    char bpm_str[32];
+                    if (has_clock_sync) {
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:>%.0f", active_bpm);
                     } else {
-                        snprintf(lcd_text, sizeof(lcd_text),
-                                 "File: %s%s\n[Ready] BPM:%.0f",
-                                 sfz_filename.c_str(), clock_info, tempo_bpm);
+                        snprintf(bpm_str, sizeof(bpm_str), "BPM:%.0f", active_bpm);
                     }
+
+                    // Line 1: File name + note info (if playing)
+                    char line1[64];
+                    if (current_note >= 0) {
+                        snprintf(line1, sizeof(line1), "File: %s N:%d V:%d",
+                                 sfz_filename.c_str(), current_note, current_velocity);
+                    } else {
+                        snprintf(line1, sizeof(line1), "File: %s",
+                                 sfz_filename.c_str());
+                    }
+
+                    // Line 2: BPM + sync status (always visible)
+                    char line2[64];
+                    if (status_info[0] != '\0') {
+                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                    } else {
+                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                    }
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
                 }
                 lcd_write(lcd_display, lcd_text);
 
@@ -2903,8 +2960,9 @@ int main(int argc, char* argv[]) {
                     float prev_tempo = tempo_bpm;
                     if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
                         if (prev_tempo != tempo_bpm && midi_pad_player) {
-                            // Update MIDI file player tempo
-                            midi_file_pad_player_set_tempo(midi_pad_player, tempo_bpm);
+                            // Update MIDI file player tempo and active BPM
+                            active_bpm = tempo_bpm;
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                         }
                     }
                     ImGui::Dummy(ImVec2(0, 8.0f));
@@ -2913,7 +2971,8 @@ int main(int argc, char* argv[]) {
                     if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
                         tempo_bpm = 125.0f;
                         if (midi_pad_player) {
-                            midi_file_pad_player_set_tempo(midi_pad_player, tempo_bpm);
+                            active_bpm = tempo_bpm;
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                         }
                     }
 
@@ -3649,24 +3708,10 @@ int main(int argc, char* argv[]) {
                                     // Not playing - start/retrigger MIDI file playback
                                     // std::cout << "=== TRIGGERING MIDI FILE for pad " << (pad_idx + 1) << ": " << pad->midi_file << " ===" << std::endl;
 
-                                    // Use quantized trigger if MIDI clock is active, otherwise immediate
-                                    // Note: We only check midi_clock.active (not running) because regroove doesn't send Start/Stop
-                                    if (midi_clock.active) {
-                                        // Quantize to quarter note boundaries
-                                        // MIDI clock sends 24 pulses per quarter note
-                                        // So we pass total_pulse_count (in pulses) and quantize to 24-pulse boundaries
-                                        int current_pulse = midi_clock.total_pulse_count;
-                                        int quantize_pulses = 24;  // 24 pulses = 1 quarter note
-
-                                        // std::cout << "  Using MIDI clock quantization: current_pulse=" << current_pulse
-                                        //           << " (quarter_note=" << (current_pulse / 24.0f)
-                                        //           << ") quantize=24 pulses BPM=" << midi_clock.bpm << std::endl;
-                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx, current_pulse, quantize_pulses);
-                                    } else {
-                                        // No MIDI clock - trigger immediately (NOT SYNCED!)
-                                        // std::cout << "  WARNING: No MIDI clock - triggering immediately (will drift!)" << std::endl;
-                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
-                                    }
+                                    // Always use immediate trigger - the player has its own internal quantization
+                                    // based on its current tempo. This ensures triggering works even when
+                                    // MIDI clock pulses stop.
+                                    midi_file_pad_player_trigger(midi_pad_player, pad_idx);
                                     note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
                                 }
 
@@ -4173,6 +4218,42 @@ int main(int argc, char* argv[]) {
 
                     ImGui::Spacing();
                     ImGui::Text("Use LEARN mode to create new MIDI mappings");
+                }
+
+                // MIDI Sync Settings
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Text("MIDI SYNC SETTINGS");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Tempo sync toggle
+                bool tempo_sync = (config.midi_clock_tempo_sync == 1);
+                if (ImGui::Checkbox("Sync tempo to MIDI Clock", &tempo_sync)) {
+                    config.midi_clock_tempo_sync = tempo_sync ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("When ENABLED: MIDI file playback tempo adjusts to match incoming MIDI Clock.\n"
+                                      "When DISABLED: Incoming tempo is shown in LCD but doesn't affect playback (visual only).");
+                }
+
+                ImGui::Spacing();
+
+                // SPP receive toggle
+                bool spp_receive = (config.midi_spp_receive == 1);
+                if (ImGui::Checkbox("Sync position to MIDI SPP", &spp_receive)) {
+                    config.midi_spp_receive = spp_receive ? 1 : 0;
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("When ENABLED: Incoming MIDI Song Position Pointer messages sync playback position.\n"
+                                      "When DISABLED: SPP messages are ignored (only tempo sync).");
                 }
             }
             else if (ui_mode == UI_MODE_SETTINGS) {

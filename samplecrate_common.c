@@ -42,6 +42,10 @@ void samplecrate_config_init(SamplecrateConfig* config) {
     config->midi_program_change_enabled[1] = 0;  // Device 1: Ignore program changes by default (use UI)
     config->midi_program_change_enabled[2] = 0;  // Device 2: Ignore program changes by default (use UI)
 
+    // MIDI sync defaults
+    config->midi_clock_tempo_sync = 1;  // Enabled by default (adjust tempo to MIDI clock)
+    config->midi_spp_receive = 1;       // Enabled by default (sync to SPP)
+
     // Mixer defaults
     config->default_master_volume = 0.7f;
     config->default_master_pan = 0.5f;
@@ -139,6 +143,8 @@ int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
             else if (strcmp(key, "midi_program_change_enabled_device_0") == 0) config->midi_program_change_enabled[0] = atoi(value);
             else if (strcmp(key, "midi_program_change_enabled_device_1") == 0) config->midi_program_change_enabled[1] = atoi(value);
             else if (strcmp(key, "midi_program_change_enabled_device_2") == 0) config->midi_program_change_enabled[2] = atoi(value);
+            else if (strcmp(key, "midi_clock_tempo_sync") == 0) config->midi_clock_tempo_sync = atoi(value);
+            else if (strcmp(key, "midi_spp_receive") == 0) config->midi_spp_receive = atoi(value);
             // Legacy support for old config files
             else if (strcmp(key, "midi_program_change_enabled") == 0) {
                 int val = atoi(value);
@@ -202,6 +208,8 @@ int samplecrate_config_save(const SamplecrateConfig* config, const char* filepat
     fprintf(f, "midi_program_change_enabled_device_0=%d\n", config->midi_program_change_enabled[0]);
     fprintf(f, "midi_program_change_enabled_device_1=%d\n", config->midi_program_change_enabled[1]);
     fprintf(f, "midi_program_change_enabled_device_2=%d\n", config->midi_program_change_enabled[2]);
+    fprintf(f, "midi_clock_tempo_sync=%d  ; 0 = visual only, 1 = adjust playback tempo\n", config->midi_clock_tempo_sync);
+    fprintf(f, "midi_spp_receive=%d  ; 0 = ignore SPP, 1 = sync to SPP\n", config->midi_spp_receive);
     fprintf(f, "\n");
 
     fprintf(f, "[Mixer]\n");
