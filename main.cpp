@@ -758,14 +758,25 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 uint64_t total_time = now - midi_clock.last_bpm_calc_time;
                 // BPM = (60,000,000 microseconds/minute) / (time for one quarter note in microseconds)
                 if (total_time > 0) {
-                    float new_bpm = 60000000.0f / total_time;
+                    float raw_bpm = 60000000.0f / total_time;
+
+                    // Smooth BPM using exponential moving average to reduce jitter
+                    // Alpha = 0.3 gives moderate smoothing (lower = more smoothing)
+                    static float smoothed_bpm = 0.0f;
+                    if (smoothed_bpm == 0.0f) {
+                        smoothed_bpm = raw_bpm;  // Initialize on first reading
+                    } else {
+                        smoothed_bpm = smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
+                    }
+
+                    float new_bpm = smoothed_bpm;
 
                     // Only update tempo if it changed significantly (more than 0.5 BPM)
                     // This prevents constant tiny adjustments that cause timing glitches
                     if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
                         std::cout << "MIDI CLOCK: BPM changed from " << midi_clock.bpm
                                   << " to " << new_bpm
-                                  << " (interval=" << total_time << "us for 24 pulses)" << std::endl;
+                                  << " (raw: " << raw_bpm << ", smoothed, interval=" << total_time << "us)" << std::endl;
                         midi_clock.bpm = new_bpm;
                         // Only adjust playback tempo if sync is enabled
                         if (config.midi_clock_tempo_sync == 1) {
