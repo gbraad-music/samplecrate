@@ -844,10 +844,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                       << std::endl;
 
             // SPP does NOT affect local pulse count - that continues running based on clock/internal timing
-            // SPP only syncs the timing of already-playing pads
+            // SPP is the PRIMARY sync source - always sync playing pads when SPP arrives
+            // MIDI clock pulses are only used to increment pulse count between SPP messages
 
-            // Sync all playing pads to current local pulse count (NOT the SPP position)
-            // This adjusts their timing reference to align with this beat boundary marker
             if (midi_pad_player) {
                 int num_synced = 0;
                 for (int i = 0; i < 32; i++) {
@@ -856,12 +855,12 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                     }
                 }
                 if (num_synced > 0) {
-                    // Sync to our local pulse count - SPP tells us "you should be on a beat NOW"
-                    midi_file_pad_player_sync_all(midi_pad_player, midi_clock.total_pulse_count);
-                    std::cout << "  Synced " << num_synced << " playing pad(s) to beat boundary (local pulse="
-                              << midi_clock.total_pulse_count << ")" << std::endl;
+                    // Sync to SPP position, NOT local pulse count
+                    midi_file_pad_player_sync_all(midi_pad_player, pulse_from_spp);
+                    std::cout << "  SPP SYNC: Synced " << num_synced << " playing pad(s) to SPP pulse "
+                              << pulse_from_spp << " (local was " << midi_clock.total_pulse_count << ")" << std::endl;
                 } else {
-                    std::cout << "  No playing pads - ready for quantized trigger on next start" << std::endl;
+                    std::cout << "  No playing pads - ready for quantized trigger" << std::endl;
                 }
             }
         } else {
