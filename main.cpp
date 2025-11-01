@@ -742,18 +742,32 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         else if (status == 0xFC) std::cout << " (Stop)";
         else if (status == 0xFB) std::cout << " (Continue)";
         else if (status == 0xF2) std::cout << " (SPP) data1=" << (int)data1 << " data2=" << (int)data2;
-        std::cout << std::endl;
+        std::cout << " from device_id=" << device_id << std::endl;
     }
 
     // Handle MIDI Clock messages (Real-Time messages - these don't have channels)
     if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
         uint64_t now = get_microseconds();
 
-        // Debug: log first few clock messages
-        static int clock_msg_count = 0;
-        if (clock_msg_count < 5) {
-            std::cout << "[MIDI CLOCK] Received clock pulse #" << clock_msg_count << std::endl;
-            clock_msg_count++;
+        // Debug: Count clock pulses and show rate every second
+        static int total_clock_pulses = 0;
+        static int pulses_this_second = 0;
+        static uint64_t last_report_time = 0;
+
+        total_clock_pulses++;
+        pulses_this_second++;
+
+        if (last_report_time == 0) {
+            last_report_time = now;
+        }
+
+        // Report every second
+        if (now - last_report_time >= 1000000) {  // 1 second in microseconds
+            std::cout << "[MIDI CLOCK] Received " << pulses_this_second
+                      << " pulses in last second (total: " << total_clock_pulses
+                      << ", device_id=" << device_id << ")" << std::endl;
+            pulses_this_second = 0;
+            last_report_time = now;
         }
 
         // Enable external clock mode on sequencer (single source of truth)
@@ -802,11 +816,12 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                         // Only adjust playback tempo if sync is enabled
                         if (config.midi_clock_tempo_sync == 1) {
                             active_bpm = midi_clock.bpm;  // Update active playback tempo
+                            tempo_bpm = midi_clock.bpm;   // Update UI slider to match
                             if (sequencer) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
-                            std::cout << "  -> active_bpm updated to " << active_bpm << std::endl;
+                            std::cout << "  -> active_bpm updated to " << active_bpm << " (UI slider synced)" << std::endl;
                         }
                     } else {
                         midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
@@ -825,15 +840,26 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         return;
     } else if (status == 0xFA) {  // MIDI Start
         midi_clock.running = true;
+        // Don't set midi_clock.active = true yet - wait for first clock pulse!
+        // This prevents switching to external mode when only SPP is sent (no 0xF8 pulses)
         midi_clock.pulse_count = 0;
         midi_clock.beat_count = 0;  // Reset beat counter on start
         midi_clock.total_pulse_count = 0;  // Reset total pulse count for precise sync
         midi_clock.last_bpm_calc_time = get_microseconds();
-        std::cout << "MIDI Start received" << std::endl;
+
+        // Don't enable external clock mode yet - wait for first 0xF8 pulse
+        // If source only sends SPP (no clock), we'll stay in internal mode
+
+        std::cout << "MIDI Start received (waiting for clock pulses to enable external mode)" << std::endl;
         return;
     } else if (status == 0xFC) {  // MIDI Stop
         midi_clock.running = false;
         midi_clock.active = false;
+
+        // Reset BPM calculation state to prevent huge jumps on restart
+        midi_clock.last_clock_time = 0;
+        midi_clock.last_bpm_calc_time = 0;
+        midi_clock.pulse_count = 0;
 
         // Switch sequencer back to internal clock
         if (sequencer) {
@@ -1171,10 +1197,15 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
             // Update sequencer - it will advance position based on its clock mode
             current_pulse = medness_sequencer_update(sequencer, frames, 44100);
 
-            // Debug: log sequencer position every 96 pulses (every bar)
+            // Debug: log sequencer position and BPM every 96 pulses (every bar)
             static int last_debug_pulse = -1;
             if (current_pulse >= 0 && current_pulse / 96 != last_debug_pulse / 96) {
-                std::cout << "[SEQUENCER] pulse=" << current_pulse << " row=" << medness_sequencer_get_row(sequencer) << std::endl;
+                float sequencer_bpm = medness_sequencer_get_bpm(sequencer);
+                std::cout << "[SEQUENCER] pulse=" << current_pulse
+                          << " row=" << medness_sequencer_get_row(sequencer)
+                          << " BPM=" << sequencer_bpm
+                          << " (external_clock=" << (midi_clock.active ? "YES" : "NO") << ")"
+                          << std::endl;
                 last_debug_pulse = current_pulse;
             }
         }
@@ -1822,16 +1853,10 @@ int main(int argc, char* argv[]) {
         }
 
         // Load MIDI device configuration from config file
-        // If not configured (-1), use port 0 for first device
+        // Respect user's configuration - don't auto-default to port 0
         midi_device_ports[0] = config.midi_device_0;
         midi_device_ports[1] = config.midi_device_1;
         midi_device_ports[2] = config.midi_device_2;
-
-        // If first device not configured, default to port 0
-        if (midi_device_ports[0] == -1 && num_midi_ports > 0) {
-            midi_device_ports[0] = 0;
-            std::cout << "MIDI device 0 not configured, defaulting to port 0" << std::endl;
-        }
 
         if (midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES) == 0) {
             std::cout << "MIDI initialized successfully" << std::endl;
@@ -3122,16 +3147,30 @@ int main(int argc, char* argv[]) {
 
                     // Tempo slider (50 BPM to 200 BPM)
                     // Up = faster (200), Down = slower (50)
+                    // Disable slider when external MIDI clock is active
+                    bool is_external_clock = midi_clock.active && midi_clock.running;
+                    if (is_external_clock) {
+                        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);  // Dim the slider
+                    }
+
                     float prev_tempo = tempo_bpm;
                     if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
-                        if (prev_tempo != tempo_bpm && midi_pad_player) {
+                        // Only allow changes when external clock is NOT active
+                        if (!is_external_clock && prev_tempo != tempo_bpm && midi_pad_player) {
                             // Update MIDI file player tempo and active BPM
                             active_bpm = tempo_bpm;
                             if (sequencer) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        } else if (is_external_clock) {
+                            // Revert to MIDI clock BPM if user tries to drag during external sync
+                            tempo_bpm = midi_clock.bpm;
                         }
+                    }
+
+                    if (is_external_clock) {
+                        ImGui::PopStyleVar();
                     }
                     ImGui::Dummy(ImVec2(0, 8.0f));
 
