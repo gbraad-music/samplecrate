@@ -122,6 +122,40 @@ struct {
 // Error message for LCD display
 std::string error_message = "";
 
+// MIDI monitor (circular buffer for recent MIDI messages)
+#define MIDI_MONITOR_SIZE 50
+struct MidiMonitorEntry {
+    char timestamp[16];
+    int device_id;
+    char type[16];      // "Note On", "Note Off", "CC", "Prog Change", etc.
+    int number;         // Note number or CC number
+    int value;          // Velocity or CC value
+    int program;        // Which program it was routed to
+};
+static MidiMonitorEntry midi_monitor[MIDI_MONITOR_SIZE];
+static int midi_monitor_head = 0;
+static int midi_monitor_count = 0;
+
+void add_to_midi_monitor(int device_id, const char* type, int number, int value, int program) {
+    MidiMonitorEntry* entry = &midi_monitor[midi_monitor_head];
+
+    // Get current time
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    strftime(entry->timestamp, sizeof(entry->timestamp), "%H:%M:%S", tm_info);
+
+    entry->device_id = device_id;
+    snprintf(entry->type, sizeof(entry->type), "%s", type);
+    entry->number = number;
+    entry->value = value;
+    entry->program = program;
+
+    midi_monitor_head = (midi_monitor_head + 1) % MIDI_MONITOR_SIZE;
+    if (midi_monitor_count < MIDI_MONITOR_SIZE) {
+        midi_monitor_count++;
+    }
+}
+
 // Fullscreen pads mode (F12 toggle - hides left panel)
 bool fullscreen_pads_mode = false;
 
@@ -455,17 +489,12 @@ void switch_program(int program_index) {
 
     current_program = program_index;
 
-    // Only update midi_target_program for devices that have program change DISABLED
-    // Devices with program change enabled should be controlled only by MIDI messages
-    if (!config.midi_program_change_enabled[0]) {
-        midi_target_program[0] = program_index;
-    }
-    if (!config.midi_program_change_enabled[1]) {
-        midi_target_program[1] = program_index;
-    }
-    if (!config.midi_program_change_enabled[2]) {
-        midi_target_program[2] = program_index;
-    }
+    // Update midi_target_program for all devices when program changes via UI
+    // If a device has program change enabled, it can still be overridden by MIDI messages
+    // But UI selection should update all devices by default
+    midi_target_program[0] = program_index;
+    midi_target_program[1] = program_index;
+    midi_target_program[2] = program_index;
 
     std::cout << "Switching to program " << (program_index + 1) << ": " << rsx->program_files[program_index] << std::endl;
 
@@ -740,14 +769,15 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
     // Debug: Log important real-time MIDI messages (start, stop, continue, SPP)
     // Clock (0xF8) is too spammy - it fires 24 times per beat!
-    if (status == 0xFA || status == 0xFC || status == 0xFB || status == 0xF2) {
-        std::cout << "[MIDI RT] Received: 0x" << std::hex << (int)status << std::dec;
-        if (status == 0xFA) std::cout << " (Start)";
-        else if (status == 0xFC) std::cout << " (Stop)";
-        else if (status == 0xFB) std::cout << " (Continue)";
-        else if (status == 0xF2) std::cout << " (SPP) data1=" << (int)data1 << " data2=" << (int)data2;
-        std::cout << " from device_id=" << device_id << std::endl;
-    }
+    // Commented out - use MIDI Monitor in UI instead
+    // if (status == 0xFA || status == 0xFC || status == 0xFB || status == 0xF2) {
+    //     std::cout << "[MIDI RT] Received: 0x" << std::hex << (int)status << std::dec;
+    //     if (status == 0xFA) std::cout << " (Start)";
+    //     else if (status == 0xFC) std::cout << " (Stop)";
+    //     else if (status == 0xFB) std::cout << " (Continue)";
+    //     else if (status == 0xF2) std::cout << " (SPP) data1=" << (int)data1 << " data2=" << (int)data2;
+    //     std::cout << " from device_id=" << device_id << std::endl;
+    // }
 
     // Handle MIDI Clock messages (Real-Time messages - these don't have channels)
     if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
@@ -776,7 +806,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
         // Enable external clock mode on sequencer (single source of truth)
         if (sequencer && !midi_clock.active) {
-            std::cout << "[MIDI CLOCK] Switching to external clock mode" << std::endl;
+            // std::cout << "[MIDI CLOCK] Switching to external clock mode" << std::endl;
             medness_sequencer_set_external_clock(sequencer, 1);
 
             // Reset BPM smoothing filter when first enabling external clock
@@ -863,7 +893,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         // Don't enable external clock mode yet - wait for first 0xF8 pulse
         // If source only sends SPP (no clock), we'll stay in internal mode
 
-        std::cout << "MIDI Start received (waiting for clock pulses to enable external mode)" << std::endl;
+        // std::cout << "MIDI Start received (waiting for clock pulses to enable external mode)" << std::endl;
         return;
     } else if (status == 0xFC) {  // MIDI Stop
         midi_clock.running = false;
@@ -878,15 +908,15 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
         // Switch sequencer back to internal clock
         if (sequencer) {
-            std::cout << "[MIDI CLOCK] Switching to internal clock mode" << std::endl;
+            // std::cout << "[MIDI CLOCK] Switching to internal clock mode" << std::endl;
             medness_sequencer_set_external_clock(sequencer, 0);
         }
 
-        std::cout << "MIDI Stop received" << std::endl;
+        // std::cout << "MIDI Stop received" << std::endl;
         return;
     } else if (status == 0xFB) {  // MIDI Continue
         midi_clock.running = true;
-        std::cout << "MIDI Continue received" << std::endl;
+        // std::cout << "MIDI Continue received" << std::endl;
         return;
     } else if (status == 0xF2) {  // MIDI Song Position Pointer
         // SPP format: 0xF2, LSB (7-bit), MSB (7-bit)
@@ -894,8 +924,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         int spp_position = data1 | (data2 << 7);
         midi_clock.spp_position = spp_position;
 
-        std::cout << "DEBUG: SPP handler called, raw position=" << spp_position
-                  << ", config.midi_spp_receive=" << config.midi_spp_receive << std::endl;
+        // std::cout << "DEBUG: SPP handler called, raw position=" << spp_position
+        //           << ", config.midi_spp_receive=" << config.midi_spp_receive << std::endl;
 
         // Only sync position if SPP receive is enabled
         if (config.midi_spp_receive == 1) {
@@ -1032,11 +1062,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             // Map MIDI program number to our programs (0-3)
             int target_program = program_number % rsx->num_programs;
             midi_target_program[device_id] = target_program;
-            // std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
-            //           << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
-            //           << " - UI remains at program " << (current_program + 1) << std::endl;
-        } else {
-            // std::cout << "    No RSX programs loaded, ignoring Program Change" << std::endl;
+
+            // Log to MIDI monitor
+            add_to_midi_monitor(device_id, "Prog Change", program_number, 0, target_program + 1);
         }
         return;
     }
@@ -1067,6 +1095,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             std::cout << "Note " << (int)data1 << " suppressed for program " << (target_prog + 1) << std::endl;
             return;  // Don't play suppressed notes
         }
+
+        // Log to MIDI monitor
+        add_to_midi_monitor(device_id, "Note On", data1, data2, target_prog + 1);
 
         // Send MIDI note directly to the appropriate synth (bypass pad mapping)
         std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1101,6 +1132,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 }
             }
         }
+
+        // Log to MIDI monitor
+        add_to_midi_monitor(device_id, "Note Off", data1, data2, target_prog + 1);
 
         // Send MIDI note off directly to the appropriate synth (bypass pad mapping)
         std::lock_guard<std::mutex> lock(synth_mutex);
@@ -4175,6 +4209,30 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
+                // Program routing for Device 1
+                ImGui::SameLine();
+                ImGui::PushItemWidth(150.0f);
+
+                char prog_preview_0[32];
+                if (config.midi_program_change_enabled[0]) {
+                    snprintf(prog_preview_0, sizeof(prog_preview_0), "Program Change");
+                } else {
+                    snprintf(prog_preview_0, sizeof(prog_preview_0), "Follow UI");
+                }
+
+                if (ImGui::BeginCombo("##prog_route_0", prog_preview_0)) {
+                    if (ImGui::Selectable("Follow UI", config.midi_program_change_enabled[0] == 0)) {
+                        config.midi_program_change_enabled[0] = 0;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    if (ImGui::Selectable("Program Change", config.midi_program_change_enabled[0] == 1)) {
+                        config.midi_program_change_enabled[0] = 1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
                 ImGui::Spacing();
                 ImGui::Spacing();
 
@@ -4257,6 +4315,30 @@ int main(int argc, char* argv[]) {
                             config.midi_channel[1] = ch;
                             samplecrate_config_save(&config, "samplecrate.ini");
                         }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                // Program routing for Device 2
+                ImGui::SameLine();
+                ImGui::PushItemWidth(150.0f);
+
+                char prog_preview_1[32];
+                if (config.midi_program_change_enabled[1]) {
+                    snprintf(prog_preview_1, sizeof(prog_preview_1), "Program Change");
+                } else {
+                    snprintf(prog_preview_1, sizeof(prog_preview_1), "Follow UI");
+                }
+
+                if (ImGui::BeginCombo("##prog_route_1", prog_preview_1)) {
+                    if (ImGui::Selectable("Follow UI", config.midi_program_change_enabled[1] == 0)) {
+                        config.midi_program_change_enabled[1] = 0;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    if (ImGui::Selectable("Program Change", config.midi_program_change_enabled[1] == 1)) {
+                        config.midi_program_change_enabled[1] = 1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
                     }
                     ImGui::EndCombo();
                 }
@@ -4349,37 +4431,29 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
-                ImGui::Spacing();
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
+                // Program routing for Device 3
+                ImGui::SameLine();
+                ImGui::PushItemWidth(150.0f);
 
-                // MIDI Program Change enable/disable (per-device)
-                ImGui::Text("MIDI Program Change:");
-
-                // Device 0
-                bool pc_enabled_0 = (config.midi_program_change_enabled[0] != 0);
-                if (ImGui::Checkbox("Device 0: Respond to Program Change", &pc_enabled_0)) {
-                    config.midi_program_change_enabled[0] = pc_enabled_0 ? 1 : 0;
-                    samplecrate_config_save(&config, "samplecrate.ini");
+                char prog_preview_2[32];
+                if (config.midi_program_change_enabled[2]) {
+                    snprintf(prog_preview_2, sizeof(prog_preview_2), "Program Change");
+                } else {
+                    snprintf(prog_preview_2, sizeof(prog_preview_2), "Follow UI");
                 }
 
-                // Device 1
-                bool pc_enabled_1 = (config.midi_program_change_enabled[1] != 0);
-                if (ImGui::Checkbox("Device 1: Respond to Program Change", &pc_enabled_1)) {
-                    config.midi_program_change_enabled[1] = pc_enabled_1 ? 1 : 0;
-                    samplecrate_config_save(&config, "samplecrate.ini");
+                if (ImGui::BeginCombo("##prog_route_2", prog_preview_2)) {
+                    if (ImGui::Selectable("Follow UI", config.midi_program_change_enabled[2] == 0)) {
+                        config.midi_program_change_enabled[2] = 0;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    if (ImGui::Selectable("Program Change", config.midi_program_change_enabled[2] == 1)) {
+                        config.midi_program_change_enabled[2] = 1;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    ImGui::EndCombo();
                 }
-
-                // Device 2
-                bool pc_enabled_2 = (config.midi_program_change_enabled[2] != 0);
-                if (ImGui::Checkbox("Device 2: Respond to Program Change", &pc_enabled_2)) {
-                    config.midi_program_change_enabled[2] = pc_enabled_2 ? 1 : 0;
-                    samplecrate_config_save(&config, "samplecrate.ini");
-                }
-
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                    "When disabled: UI selection leads. When enabled: routes per program change");
+                ImGui::PopItemWidth();
 
                 ImGui::Spacing();
                 ImGui::Spacing();
@@ -4513,6 +4587,71 @@ int main(int argc, char* argv[]) {
 
                     ImGui::Spacing();
                     ImGui::Text("Use LEARN mode to create new MIDI mappings");
+                }
+
+                // MIDI Monitor
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Text("MIDI MONITOR");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextWrapped("Recent MIDI messages (shows device, type, and which program received it):");
+                ImGui::Dummy(ImVec2(0, 8.0f));
+
+                // MIDI monitor table
+                ImGui::BeginChild("##midi_monitor", ImVec2(0, 250.0f), true);
+
+                ImGui::Columns(6, "midi_monitor_columns");
+                ImGui::SetColumnWidth(0, 70.0f);   // Time
+                ImGui::SetColumnWidth(1, 60.0f);   // Device
+                ImGui::SetColumnWidth(2, 100.0f);  // Type
+                ImGui::SetColumnWidth(3, 70.0f);   // Number
+                ImGui::SetColumnWidth(4, 70.0f);   // Value
+                ImGui::SetColumnWidth(5, 90.0f);   // Program
+
+                ImGui::Text("Time"); ImGui::NextColumn();
+                ImGui::Text("Device"); ImGui::NextColumn();
+                ImGui::Text("Type"); ImGui::NextColumn();
+                ImGui::Text("Number"); ImGui::NextColumn();
+                ImGui::Text("Value"); ImGui::NextColumn();
+                ImGui::Text("Program"); ImGui::NextColumn();
+                ImGui::Separator();
+
+                // Display MIDI monitor entries (newest first)
+                for (int i = 0; i < midi_monitor_count; i++) {
+                    int idx = (midi_monitor_head - 1 - i + MIDI_MONITOR_SIZE) % MIDI_MONITOR_SIZE;
+                    MidiMonitorEntry* entry = &midi_monitor[idx];
+
+                    ImGui::Text("%s", entry->timestamp); ImGui::NextColumn();
+
+                    ImGui::Text("IN%d", entry->device_id); ImGui::NextColumn();
+
+                    // Color-code message type
+                    if (strstr(entry->type, "Note On")) {
+                        ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", entry->type);
+                    } else if (strstr(entry->type, "Note Off")) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "%s", entry->type);
+                    } else if (strstr(entry->type, "Prog")) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "%s", entry->type);
+                    } else {
+                        ImGui::Text("%s", entry->type);
+                    }
+                    ImGui::NextColumn();
+
+                    ImGui::Text("%d", entry->number); ImGui::NextColumn();
+                    ImGui::Text("%d", entry->value); ImGui::NextColumn();
+                    ImGui::Text("P%d", entry->program); ImGui::NextColumn();
+                }
+
+                ImGui::Columns(1);
+                ImGui::EndChild();
+
+                ImGui::Dummy(ImVec2(0, 8.0f));
+                if (ImGui::Button("Clear Monitor", ImVec2(120.0f, 0.0f))) {
+                    midi_monitor_count = 0;
+                    midi_monitor_head = 0;
                 }
 
                 // MIDI Sync Settings
