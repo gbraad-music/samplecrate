@@ -28,6 +28,7 @@ extern "C" {
 #include "midi.h"
 #include "input_mappings.h"
 #include "sfz_builder.h"
+#include "medness_sequencer.h"
 #include "midi_file_player.h"
 #include "midi_file_pad_player.h"
 }
@@ -75,11 +76,13 @@ std::string rsx_file_path = "";
 // MIDI file pad player
 MidiFilePadPlayer* midi_pad_player = nullptr;
 
+// Pattern sequencer (single source of truth for pattern position)
+MednessSequencer* sequencer = nullptr;
+
 // Pad index storage for MIDI file callbacks (so each pad knows which program to use)
 int midi_pad_indices[RSX_MAX_NOTE_PADS];
 
-// MIDI sync/quantization settings
-int midi_quantize_beats = 4;  // Quantize to this many beats (1=quarter, 2=half, 4=bar, 8=2 bars) - loaded from config
+// MIDI sync settings
 
 // Tempo control (for MIDI file playback)
 float tempo_bpm = 125.0f;  // Manual tempo slider value
@@ -731,14 +734,14 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     int msg_type = status & 0xF0;
     int channel = status & 0x0F;
 
-    // Debug: Log only important real-time MIDI messages (start, stop, continue)
+    // Debug: Log important real-time MIDI messages (start, stop, continue, SPP)
     // Clock (0xF8) is too spammy - it fires 24 times per beat!
-    if (status >= 0xF8 && status != 0xF8) {
+    if (status == 0xFA || status == 0xFC || status == 0xFB || status == 0xF2) {
         std::cout << "[MIDI RT] Received: 0x" << std::hex << (int)status << std::dec;
         if (status == 0xFA) std::cout << " (Start)";
         else if (status == 0xFC) std::cout << " (Stop)";
         else if (status == 0xFB) std::cout << " (Continue)";
-        else if (status == 0xF2) std::cout << " (SPP)";
+        else if (status == 0xF2) std::cout << " (SPP) data1=" << (int)data1 << " data2=" << (int)data2;
         std::cout << std::endl;
     }
 
@@ -746,8 +749,26 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     if (status == 0xF8) {  // MIDI Clock (24 ppqn - pulses per quarter note)
         uint64_t now = get_microseconds();
 
+        // Debug: log first few clock messages
+        static int clock_msg_count = 0;
+        if (clock_msg_count < 5) {
+            std::cout << "[MIDI CLOCK] Received clock pulse #" << clock_msg_count << std::endl;
+            clock_msg_count++;
+        }
+
+        // Enable external clock mode on sequencer (single source of truth)
+        if (sequencer && !midi_clock.active) {
+            std::cout << "[MIDI CLOCK] Switching to external clock mode" << std::endl;
+            medness_sequencer_set_external_clock(sequencer, 1);
+        }
+
         if (midi_clock.last_clock_time > 0) {
             uint64_t interval = now - midi_clock.last_clock_time;
+
+            // Forward clock pulse to sequencer (it manages the pattern position)
+            if (sequencer) {
+                medness_sequencer_clock_pulse(sequencer);
+            }
 
             // Increment total pulse count for sub-beat precision
             midi_clock.total_pulse_count++;
@@ -781,6 +802,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                         // Only adjust playback tempo if sync is enabled
                         if (config.midi_clock_tempo_sync == 1) {
                             active_bpm = midi_clock.bpm;  // Update active playback tempo
+                            if (sequencer) {
+                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                            }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                             std::cout << "  -> active_bpm updated to " << active_bpm << std::endl;
                         }
@@ -809,6 +833,14 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         return;
     } else if (status == 0xFC) {  // MIDI Stop
         midi_clock.running = false;
+        midi_clock.active = false;
+
+        // Switch sequencer back to internal clock
+        if (sequencer) {
+            std::cout << "[MIDI CLOCK] Switching to internal clock mode" << std::endl;
+            medness_sequencer_set_external_clock(sequencer, 0);
+        }
+
         std::cout << "MIDI Stop received" << std::endl;
         return;
     } else if (status == 0xFB) {  // MIDI Continue
@@ -821,29 +853,98 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         int spp_position = data1 | (data2 << 7);
         midi_clock.spp_position = spp_position;
 
-        std::cout << "DEBUG: SPP handler called, position=" << spp_position
+        std::cout << "DEBUG: SPP handler called, raw position=" << spp_position
                   << ", config.midi_spp_receive=" << config.midi_spp_receive << std::endl;
 
         // Only sync position if SPP receive is enabled
         if (config.midi_spp_receive == 1) {
+            // Only sync from SPP if we haven't started yet or clock isn't running
+            // Once MIDI clock is active, ignore SPP (sender's song structure differs)
+            if (midi_clock.active && midi_clock.running) {
+                // Already synced and running - ignore SPP updates
+                static int ignore_count = 0;
+                if (ignore_count++ % 20 == 0) {
+                    std::cout << "[SPP] Ignoring SPP during playback (sender: multi-pattern song, receiver: single pattern)" << std::endl;
+                }
+                return;
+            }
+
             midi_clock.spp_synced = true;
-            midi_clock.active = true;  // SPP implies MIDI clock is active
-            midi_clock.running = true; // SPP implies transport is running
+            midi_clock.active = true;
+            midi_clock.running = true;
+            midi_clock.last_clock_time = get_microseconds();
 
-            // SPP is a PATTERN position marker - tells us where we are in the repeating loop
-            // We use it to align playback when triggering pads
-            // We do NOT use it to constantly adjust running playback (that causes instability)
+            // SPP tells us the PATTERN POSITION (row in the pattern)
+            // SPP is in 16th notes (0-63 for a 4-bar pattern)
+            // We convert to pulses: each 16th note = 6 MIDI clock pulses
+            // Pattern position just CYCLES 0-383 pulses
+            const int PATTERN_LENGTH_SIXTEENTHS = 64;
+            const int PATTERN_LENGTH_PULSES = 384;
 
-            int beat_number = spp_position / 4;  // Convert 16th notes to quarter notes
-            int pulse_from_spp = spp_position * 6;  // Each 16th note = 6 MIDI clock pulses
+            // SPP position within pattern (cycles 0-63)
+            int spp_within_pattern = spp_position % PATTERN_LENGTH_SIXTEENTHS;
+            int pulse_within_pattern = spp_within_pattern * 6;  // Convert to pulses (0-378)
 
-            std::cout << "MIDI SPP received: position=" << spp_position << " (16th notes), beat="
-                      << beat_number << ", spp_pulse=" << pulse_from_spp
-                      << " | Local pulse=" << midi_clock.total_pulse_count
-                      << std::endl;
+            // Get current sequencer position
+            int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
 
-            // SPP just updates our knowledge of the pattern position
-            // The actual sync happens when pads are triggered (they start at the SPP position)
+            // Calculate drift (accounting for pattern wrap)
+            // Find the shortest distance between current and target, considering wrap
+            int drift = pulse_within_pattern - current_pulse;
+
+            // Normalize drift to the shortest path around the circular pattern
+            // Example: current=380, target=10 → drift=10-380=-370
+            //   After normalization: -370+384=14 (we're 14 pulses behind, wrap forward)
+            // Example: current=10, target=380 → drift=380-10=370
+            //   After normalization: 370-384=-14 (we're 14 pulses ahead, wrap backward)
+            int original_drift = drift;
+            if (drift > PATTERN_LENGTH_PULSES / 2) {
+                drift -= PATTERN_LENGTH_PULSES;  // Target is behind us (wrap backward)
+            } else if (drift <= -PATTERN_LENGTH_PULSES / 2) {
+                drift += PATTERN_LENGTH_PULSES;  // Target is ahead of us (wrap forward)
+            }
+
+            // Debug: Log drift calculation (occasionally)
+            static int spp_count = 0;
+            if (spp_count++ % 5 == 0) {
+                std::cout << "[SPP DEBUG] current=" << current_pulse << " target=" << pulse_within_pattern
+                          << " raw_drift=" << original_drift << " normalized_drift=" << drift << std::endl;
+            }
+
+            // SPP sync strategy:
+            // - Large drift (>6 pulses = 1 sixteenth): Hard sync (accept SPP position)
+            // - Medium drift (3-6 pulses): Soft sync only if not using external clock
+            // - Small drift (1-2 pulses): Ignore - normal jitter from MIDI timing
+
+            const int HARD_SYNC_THRESHOLD = 6;   // More than 1 sixteenth note
+            const int SOFT_SYNC_THRESHOLD = 3;   // Half a sixteenth note
+
+            bool is_external_clock = (sequencer && midi_clock.active);
+
+            if (abs(drift) >= HARD_SYNC_THRESHOLD) {
+                // Significant drift - do hard position sync
+                if (sequencer) {
+                    medness_sequencer_set_spp(sequencer, spp_position);
+                }
+                midi_clock.total_pulse_count = pulse_within_pattern;
+
+                std::cout << "*** SPP HARD SYNC *** spp=" << spp_position
+                          << " pulse=" << pulse_within_pattern
+                          << " (drift=" << drift << " pulses) ***" << std::endl;
+
+            } else if (abs(drift) >= SOFT_SYNC_THRESHOLD && !is_external_clock) {
+                // Medium drift and using internal clock - do soft sync
+                // Don't sync when external clock is driving (trust the clock pulses)
+                if (sequencer) {
+                    medness_sequencer_set_spp(sequencer, spp_position);
+                }
+                midi_clock.total_pulse_count = pulse_within_pattern;
+
+                std::cout << "*** SPP SOFT SYNC *** spp=" << spp_position
+                          << " pulse=" << pulse_within_pattern
+                          << " (drift=" << drift << " pulses) ***" << std::endl;
+            }
+            // else: drift is small or external clock is driving - ignore SPP, trust clock pulses
         } else {
             std::cout << "MIDI SPP received but IGNORED (disabled in settings): position="
                       << spp_position << std::endl;
@@ -1063,55 +1164,19 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         //     logged_clock_state = true;
         // }
 
-        // Pass MIDI clock pulse count if active, otherwise -1
-        // This enables quantized triggering to wait for beat boundaries
-        // If MIDI clock/SPP is active but clock pulses stopped, use internal timing
+        // Get pattern position from sequencer (single source of truth)
+        // Sequencer handles internal timing advancement
         int current_pulse = -1;
-        if (midi_clock.active && midi_clock.running) {
-            // Check if MIDI clock pulses have stopped (no pulse in last 100ms)
-            static uint64_t last_internal_update = 0;
-            static float accumulated_pulses = 0.0f;
-            uint64_t now = get_microseconds();
-            bool clock_stopped = (midi_clock.last_clock_time > 0) && 
-                                ((now - midi_clock.last_clock_time) > 100000); // 100ms threshold
+        if (sequencer && medness_sequencer_is_active(sequencer)) {
+            // Update sequencer - it will advance position based on its clock mode
+            current_pulse = medness_sequencer_update(sequencer, frames, 44100);
 
-            if (clock_stopped && active_bpm > 0) {
-                // MIDI clock stopped - use internal timing to keep pulse count advancing
-                // Calculate how many pulses should have elapsed based on time and BPM
-                if (last_internal_update == 0) {
-                    last_internal_update = now;
-                    std::cout << "INTERNAL CLOCK: Switching from MIDI clock to internal timing"
-                              << " | active_bpm=" << active_bpm
-                              << " | midi_clock.bpm=" << midi_clock.bpm << std::endl;
-                }
-                
-                uint64_t time_delta = now - last_internal_update;
-
-
-                // Pulses per microsecond = (BPM * 24) / 60000000
-                float pulses_per_us = (active_bpm * 24.0f) / 60000000.0f;
-                float exact_pulses = time_delta * pulses_per_us;
-                accumulated_pulses += exact_pulses;
-
-                int pulse_increment = (int)accumulated_pulses;
-
-                if (pulse_increment > 0) {
-                    midi_clock.total_pulse_count += pulse_increment;
-                    accumulated_pulses -= pulse_increment;  // Keep the fractional part
-                    last_internal_update = now;
-                } else {
-                    // Update timestamp even if no pulse yet (accumulating fractions)
-                    last_internal_update = now;
-                }
-            } else if (!clock_stopped) {
-                // Clock is running - reset internal timer
-                if (last_internal_update > 0) {
-                    std::cout << "INTERNAL CLOCK: Switching back to MIDI clock" << std::endl;
-                }
-                last_internal_update = 0;
+            // Debug: log sequencer position every 96 pulses (every bar)
+            static int last_debug_pulse = -1;
+            if (current_pulse >= 0 && current_pulse / 96 != last_debug_pulse / 96) {
+                std::cout << "[SEQUENCER] pulse=" << current_pulse << " row=" << medness_sequencer_get_row(sequencer) << std::endl;
+                last_debug_pulse = current_pulse;
             }
-            
-            current_pulse = midi_clock.total_pulse_count;
         }
         midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_pulse);
     }
@@ -1440,11 +1505,6 @@ int main(int argc, char* argv[]) {
     // Load expanded pads setting from config
     expanded_pads = (config.expanded_pads != 0);
 
-    // Load MIDI quantize setting from config
-    midi_quantize_beats = config.midi_quantize_beats;
-
-    // Load MIDI quantize setting from config
-    midi_quantize_beats = config.midi_quantize_beats;
 
     // Apply config defaults to mixer
     mixer.master_volume = config.default_master_volume;
@@ -1506,8 +1566,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Initialize MIDI file pad player
-    midi_pad_player = midi_file_pad_player_create();
+    // Initialize pattern sequencer (single source of truth for pattern position)
+    sequencer = medness_sequencer_create();
+    if (sequencer) {
+        medness_sequencer_set_bpm(sequencer, 125.0f);  // Default BPM
+        medness_sequencer_set_active(sequencer, 1);    // Always active
+    }
+
+    // Initialize MIDI file pad player (now just manages tracks, sequencer plays them)
+    midi_pad_player = midi_file_pad_player_create(sequencer);
     if (midi_pad_player) {
         midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
         midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
@@ -1938,12 +2005,15 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    // Line 2: BPM + sync status (always visible)
+                    // Get Row Position (1-64) from sequencer
+                    int row_pos = sequencer ? medness_sequencer_get_row(sequencer) : 1;
+
+                    // Line 2: BPM + Row Position + sync status
                     char line2[64];
                     if (status_info[0] != '\0') {
-                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                        snprintf(line2, sizeof(line2), "%s R:%02d %s", bpm_str, row_pos, status_info);
                     } else {
-                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                        snprintf(line2, sizeof(line2), "%s R:%02d", bpm_str, row_pos);
                     }
 
                     snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
@@ -1982,12 +2052,15 @@ int main(int argc, char* argv[]) {
                                  sfz_filename.c_str());
                     }
 
-                    // Line 2: BPM + sync status (always visible)
+                    // Get Row Position (1-64) from sequencer
+                    int row_pos = sequencer ? medness_sequencer_get_row(sequencer) : 1;
+
+                    // Line 2: BPM + Row Position + sync status
                     char line2[64];
                     if (status_info[0] != '\0') {
-                        snprintf(line2, sizeof(line2), "%s %s", bpm_str, status_info);
+                        snprintf(line2, sizeof(line2), "%s R:%02d %s", bpm_str, row_pos, status_info);
                     } else {
-                        snprintf(line2, sizeof(line2), "%s", bpm_str);
+                        snprintf(line2, sizeof(line2), "%s R:%02d", bpm_str, row_pos);
                     }
 
                     snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
@@ -3054,6 +3127,9 @@ int main(int argc, char* argv[]) {
                         if (prev_tempo != tempo_bpm && midi_pad_player) {
                             // Update MIDI file player tempo and active BPM
                             active_bpm = tempo_bpm;
+                            if (sequencer) {
+                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                            }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                         }
                     }
@@ -3064,6 +3140,9 @@ int main(int argc, char* argv[]) {
                         tempo_bpm = 125.0f;
                         if (midi_pad_player) {
                             active_bpm = tempo_bpm;
+                            if (sequencer) {
+                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                            }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                         }
                     }
@@ -3803,20 +3882,19 @@ int main(int argc, char* argv[]) {
                                     std::cout << "  midi_clock.running=" << midi_clock.running << std::endl;
                                     std::cout << "  midi_clock.total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
 
-                                    // Use quantized trigger if MIDI clock is active, otherwise trigger immediately
-                                    // Quantization ensures the pad starts on a beat boundary aligned with SPP
+                                    // Groovebox model: patterns are always running, trigger just "unmutes" them
+                                    // Start immediately at current pattern position (like unmuting a track)
                                     if (midi_clock.active && midi_clock.running) {
-                                        // MIDI clock active - use quantized trigger for beat-aligned playback
-                                        std::cout << "  MIDI Clock active: using quantized trigger" << std::endl;
+                                        // MIDI clock/SPP active - start at current pattern position
+                                        std::cout << "  MIDI Clock/SPP active: starting at current pattern position" << std::endl;
                                         std::cout << "  Current pulse: " << midi_clock.total_pulse_count << std::endl;
-                                        std::cout << "  Quantize beats: " << midi_quantize_beats << std::endl;
-                                        midi_file_pad_player_trigger_quantized(midi_pad_player, pad_idx,
-                                                                               midi_clock.total_pulse_count,
-                                                                               midi_quantize_beats);
-                                        note_pad_fade[pad_idx] = 0.5f;  // Dim blink to show it's scheduled
+
+                                        // Start immediately at current pulse - pattern is already running
+                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                        note_pad_fade[pad_idx] = 1.5f;  // Bright blink for immediate start
                                     } else {
-                                        // No MIDI clock - trigger immediately
-                                        std::cout << "  No MIDI clock: triggering immediately" << std::endl;
+                                        // No MIDI clock - trigger from beginning
+                                        std::cout << "  No MIDI clock: triggering from beginning" << std::endl;
                                         midi_file_pad_player_trigger(midi_pad_player, pad_idx);
                                         note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
                                     }
@@ -4265,31 +4343,6 @@ int main(int argc, char* argv[]) {
                     "When MIDI Clock is active, pads trigger on beat boundaries");
                 ImGui::Spacing();
 
-                const char* quantize_options[] = {
-                    "1 Beat (Quarter Note)",
-                    "2 Beats (Half Note)",
-                    "4 Beats (One Bar - 4/4)",
-                    "8 Beats (Two Bars)"
-                };
-                int quantize_index = 0;
-                if (midi_quantize_beats == 1) quantize_index = 0;
-                else if (midi_quantize_beats == 2) quantize_index = 1;
-                else if (midi_quantize_beats == 4) quantize_index = 2;
-                else if (midi_quantize_beats == 8) quantize_index = 3;
-
-                if (ImGui::Combo("Quantize To", &quantize_index, quantize_options, 4)) {
-                    switch(quantize_index) {
-                        case 0: midi_quantize_beats = 1; break;
-                        case 1: midi_quantize_beats = 2; break;
-                        case 2: midi_quantize_beats = 4; break;
-                        case 3: midi_quantize_beats = 8; break;
-                    }
-                    config.midi_quantize_beats = midi_quantize_beats;
-                    samplecrate_config_save(&config, "samplecrate.ini");
-                }
-
-                ImGui::Spacing();
-                ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 

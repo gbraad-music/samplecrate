@@ -59,6 +59,8 @@ add_executable(samplecrate
     midi.c
     input_mappings.c
     sfz_builder.c
+    medness_track.cpp
+    medness_sequencer.cpp
     midi_file_player.cpp
     midi_file_pad_player.cpp
     ${IMGUI_SOURCES}

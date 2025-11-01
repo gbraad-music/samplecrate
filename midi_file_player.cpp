@@ -27,9 +27,6 @@ struct MidiFilePlayer {
 
     bool playing;
     bool loop;                 // Loop playback
-    bool scheduled;            // Waiting for quantized start
-    int scheduled_start_beat;  // Beat number to start on (-1 = not scheduled)
-    int start_beat;            // Beat when playback started (for master clock sync)
     float tempo_bpm;           // Current tempo in BPM
     float position_seconds;    // Current playback position in seconds
     float duration_seconds;    // Total duration in seconds
@@ -49,9 +46,6 @@ MidiFilePlayer* midi_file_player_create(void) {
     player->loop_userdata = nullptr;
     player->playing = false;
     player->loop = false;  // Default: no looping
-    player->scheduled = false;  // Not scheduled
-    player->scheduled_start_beat = -1;  // No scheduled beat
-    player->start_beat = -1;  // No start beat yet
     player->tempo_bpm = 125.0f;  // Default BPM is 125
     player->position_seconds = 0.0f;
     player->duration_seconds = 0.0f;
@@ -130,42 +124,25 @@ int midi_file_player_load(MidiFilePlayer* player, const char* filename) {
     return 0;
 }
 
-// Start playback
+// Start playback immediately - syncs to global pattern position
 void midi_file_player_play(MidiFilePlayer* player) {
     if (!player) return;
 
+    std::cout << "Starting MIDI playback - will sync to current pattern position" << std::endl;
     player->playing = true;
-    player->scheduled = false;
-    player->scheduled_start_beat = -1;
-    player->start_beat = -1;  // Will be set on first update
-    player->position_seconds = 0.0f;
     player->last_tick_processed = -1;  // Reset tick tracking
     player->active_notes.clear();
 }
 
-// Schedule playback to start on a specific beat (for quantization)
+// Legacy function - now just calls play() immediately (no quantization)
 int midi_file_player_play_quantized(MidiFilePlayer* player, int current_beat, int quantize_beats) {
     if (!player) return -1;
 
-    // NOTE: current_beat is actually in PULSES (24 ppqn), not beats
-    // Convert quantize_beats to pulses: 1 beat = 24 pulses
-    int quantize_pulses = quantize_beats * 24;
+    (void)current_beat;     // Unused
+    (void)quantize_beats;   // Unused
 
-    // Calculate the next quantized pulse boundary
-    int next_pulse = ((current_beat / quantize_pulses) + 1) * quantize_pulses;
-
-    std::cout << "QUANTIZE: Scheduling playback for pulse " << next_pulse
-              << " (current=" << current_beat << ", quantize=" << quantize_beats
-              << " beats = " << quantize_pulses << " pulses)" << std::endl;
-
-    player->playing = false;  // Not playing yet
-    player->scheduled = true;
-    player->scheduled_start_beat = next_pulse;
-    player->position_seconds = 0.0f;
-    player->last_tick_processed = -1;  // Reset tick tracking
-    player->active_notes.clear();
-
-    return next_pulse;
+    midi_file_player_play(player);
+    return current_beat;  // Return current position
 }
 
 // Stop playback
@@ -173,8 +150,6 @@ void midi_file_player_stop(MidiFilePlayer* player) {
     if (!player) return;
 
     player->playing = false;
-    player->scheduled = false;
-    player->scheduled_start_beat = -1;
 
     // Send note-off for all active notes
     if (player->callback) {
@@ -185,10 +160,10 @@ void midi_file_player_stop(MidiFilePlayer* player) {
     player->active_notes.clear();
 }
 
-// Check if currently playing (includes scheduled playback)
+// Check if currently playing
 int midi_file_player_is_playing(MidiFilePlayer* player) {
     if (!player) return 0;
-    return (player->playing || player->scheduled) ? 1 : 0;
+    return player->playing ? 1 : 0;
 }
 
 // Set tempo in BPM
@@ -240,45 +215,11 @@ int midi_file_player_get_loop(MidiFilePlayer* player) {
 void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current_beat) {
     if (!player || !player->callback) return;
 
-    // Check if we're scheduled to start and the beat has arrived
-    if (player->scheduled && current_beat >= 0) {
-        if (current_beat >= player->scheduled_start_beat) {
-            std::cout << "QUANTIZE: Starting scheduled playback NOW on pulse " << current_beat
-                      << " (scheduled=" << player->scheduled_start_beat << ")" << std::endl;
-            player->scheduled = false;
-            player->scheduled_start_beat = -1;
-            player->playing = true;
-            player->start_beat = current_beat;
-
-            // Start at the position corresponding to current_beat within the pattern
-            // Pattern length is 384 pulses (64 sixteenth notes = 4 bars at 4/4)
-            // This ensures we start in sync with the SPP pattern position
-            const int PATTERN_LENGTH_PULSES = 384;
-            int pattern_position = current_beat % PATTERN_LENGTH_PULSES;
-
-            // Convert pattern position (pulses) to time (seconds)
-            // At 125 BPM: 1 pulse = 1/(125 * 24/60) seconds = 0.02 seconds
-            float seconds_per_pulse = 60.0f / (player->tempo_bpm * 24.0f);
-            player->position_seconds = pattern_position * seconds_per_pulse;
-
-            std::cout << "  Initial state: start_beat=" << player->start_beat
-                      << " pattern_pos=" << pattern_position << "/" << PATTERN_LENGTH_PULSES
-                      << " position=" << player->position_seconds << "s" << std::endl;
-        } else {
-            // Still waiting for the scheduled beat
-            static int wait_count = 0;
-            if (wait_count++ % 1000 == 0) {  // Print every 1000 frames to avoid spam
-                std::cout << "QUANTIZE: WAITING... current=" << current_beat
-                          << " scheduled=" << player->scheduled_start_beat << std::endl;
-            }
-            return;
-        }
-    }
-
     if (!player->playing) return;
 
     float old_position = player->position_seconds;
     bool did_wrap_in_fallback = false;  // Track if we already handled wrap in fallback mode
+    bool spp_jumped = false;  // Track if SPP jumped (to skip firing missed events)
 
     // If MIDI clock is active (current_beat >= 0), use beat-based sync for perfect timing
     // Otherwise fall back to delta_ms
@@ -293,47 +234,26 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // }
 
     if (current_beat >= 0) {
-        // First update: record start pulse count
-        if (player->start_beat < 0) {
-            player->start_beat = current_beat;
+        // SIMPLE: current_beat IS the pattern position (0-383 pulses cycling)
+        // Convert directly to seconds within the file
+        const int PATTERN_LENGTH_PULSES = 384;
+        int pattern_pulse = current_beat % PATTERN_LENGTH_PULSES;
+
+        float beats_in_pattern = pattern_pulse / 24.0f;  // Convert pulses to beats
+        float seconds_per_beat = 60.0f / player->tempo_bpm;
+        player->position_seconds = beats_in_pattern * seconds_per_beat;
+
+        // Debug: log position every 96 pulses (every bar)
+        static int last_debug_pulse = -1;
+        if (pattern_pulse / 96 != last_debug_pulse / 96) {
+            std::cout << "[PLAYER] pulse=" << pattern_pulse << " pos=" << player->position_seconds
+                      << "s duration=" << player->duration_seconds << "s" << std::endl;
+            last_debug_pulse = pattern_pulse;
         }
 
-        // Calculate position from pulses elapsed since start
-        // MIDI clock sends 24 pulses per quarter note (ppqn)
-        int pulses_elapsed = current_beat - player->start_beat;
-        float beats_elapsed = pulses_elapsed / 24.0f;  // Convert pulses to beats
-        float seconds_per_beat = 60.0f / player->tempo_bpm;
-        float new_position = beats_elapsed * seconds_per_beat;
-
-        // Handle looping with beat precision
+        // Loop the position within the file duration
         if (player->loop && player->duration_seconds > 0.0f) {
-            // Detect loop restart BEFORE wrapping position
-            bool will_wrap = (new_position >= player->duration_seconds && old_position < player->duration_seconds);
-
-            // Use modulo for seamless looping
-            player->position_seconds = fmod(new_position, player->duration_seconds);
-
-            if (will_wrap) {
-                // Calculate how many loop cycles have passed
-                int loop_cycles = (int)(new_position / player->duration_seconds);
-
-                // Adjust start_beat to maintain sync across loops
-                // Each loop cycle represents duration_seconds worth of beats
-                // start_beat is in PULSES (not beats), so convert: beats * 24 = pulses
-                float beats_per_loop = player->duration_seconds / (60.0f / player->tempo_bpm);
-                int pulses_per_loop = (int)(beats_per_loop * 24.0f);
-                player->start_beat += loop_cycles * pulses_per_loop;
-
-                // Note: We don't send note-offs here anymore - they'll be handled
-                // by the MIDI events themselves when we process the wrap range below
-
-                // Fire loop restart callback
-                if (player->loop_callback) {
-                    player->loop_callback(player->loop_userdata);
-                }
-            }
-        } else {
-            player->position_seconds = new_position;
+            player->position_seconds = fmod(player->position_seconds, player->duration_seconds);
         }
 
         // Stop if reached end and not looping
@@ -384,11 +304,10 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
     // On first frame after playback starts, last_tick_processed will be -1
     int old_tick = player->last_tick_processed;
 
-    // Handle loop wrap: if position wrapped around, we need to fire events in two ranges:
-    // 1. From old_tick to end of file
-    // 2. From beginning (tick 0) to new_tick
-    // Note: This can be triggered either by the MIDI clock path OR the fallback path above
-    bool did_wrap = did_wrap_in_fallback || ((old_position > player->position_seconds) && player->loop);
+    // Handle loop wrap: ONLY in fallback mode (no MIDI clock)
+    // When synced to pattern position, we just play whatever events are at current position
+    // NO "catching up" or firing missed events!
+    bool did_wrap = did_wrap_in_fallback && (current_beat < 0);
 
     if (did_wrap) {
         // DON'T reset old_tick here - keep it from last_tick_processed so we only fire
@@ -402,17 +321,17 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         }
 
         // Debug wrap events
-        // auto now = std::chrono::high_resolution_clock::now();
-        // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        // std::cout << "[" << ms << "] WRAP EVENTS old_tick=" << old_tick
-        //           << " last_tick=" << last_tick << " new_tick=" << new_tick << std::endl;
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "[" << ms << "] WRAP EVENTS old_tick=" << old_tick
+                  << " last_tick=" << last_tick << " new_tick=" << new_tick << std::endl;
 
         // Fire events from old_tick to end of file
-        // std::cout << "[WRAP PART 1] Firing events from " << old_tick << " to " << last_tick << std::endl;
+        std::cout << "[WRAP PART 1] Firing events from " << old_tick << " to " << last_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick > old_tick && evt.tick <= last_tick) {
-                // std::cout << "  [WRAP1] tick=" << evt.tick << " note=" << evt.note
-                //           << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
+                std::cout << "  [WRAP1] tick=" << evt.tick << " note=" << evt.note
+                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -428,11 +347,11 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         }
 
         // Fire events from beginning to new_tick (use >= to include tick 0)
-        // std::cout << "[WRAP PART 2] Firing events from 0 to " << new_tick << std::endl;
+        std::cout << "[WRAP PART 2] Firing events from 0 to " << new_tick << std::endl;
         for (const MidiEventState& evt : player->events) {
             if (evt.tick >= 0 && evt.tick <= new_tick) {
-                // std::cout << "  [WRAP2] tick=" << evt.tick << " note=" << evt.note
-                //           << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
+                std::cout << "  [WRAP2] tick=" << evt.tick << " note=" << evt.note
+                          << " vel=" << evt.velocity << " " << (evt.on ? "ON" : "OFF") << std::endl;
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
                 // Track active notes
@@ -449,9 +368,31 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
         // Note: last_tick_processed will be updated to new_tick at the end of this function
     } else {
         // Normal case: fire events between old_tick and new_tick
+        // When synced to sequencer, we trust its position completely
         // Use > (not >=) for old_tick to avoid firing the same event twice across frame boundaries
+
+        // Check if position wrapped (tick went backward)
+        bool position_wrapped = (new_tick < old_tick);
+
+        // When synced to sequencer (current_beat >= 0), position wraps are handled by sequencer
+        // Just play events in the current time slice, no "catch up"
+        if (position_wrapped && current_beat >= 0) {
+            // Sequencer wrapped - just reset old_tick to play from new position
+            old_tick = new_tick - 1;  // Will fire events from (new_tick-1) to new_tick
+        }
+
         for (const MidiEventState& evt : player->events) {
-            if (evt.tick > old_tick && evt.tick <= new_tick) {
+            bool should_fire = false;
+
+            if (position_wrapped && current_beat < 0) {
+                // Fallback mode wrap - fire events from old_tick to end, OR from 0 to new_tick
+                should_fire = (evt.tick > old_tick) || (evt.tick <= new_tick);
+            } else {
+                // Normal forward progression (or sequencer-synced wrap)
+                should_fire = (evt.tick > old_tick && evt.tick <= new_tick);
+            }
+
+            if (should_fire) {
                 // Fire MIDI event
                 player->callback(evt.note, evt.velocity, evt.on, player->userdata);
 
@@ -515,20 +456,9 @@ float midi_file_player_get_duration(MidiFilePlayer* player) {
     return player->duration_seconds;
 }
 
-// Sync the player's start_beat reference to current MIDI clock pulse
+// Legacy function - no longer needed since position syncs to pattern automatically
 void midi_file_player_sync_start_beat(MidiFilePlayer* player, int current_pulse) {
-    if (!player) return;
-
-    // Only sync if the player is actually playing and using MIDI clock
-    if (!player->playing || player->start_beat < 0) return;
-
-    // Update start_beat to maintain current playback position
-    // Formula: new_start = current_pulse - (current_position_in_pulses)
-    // current_position_in_pulses = position_seconds * bpm * 24 / 60
-    int current_position_pulses = (int)(player->position_seconds * player->tempo_bpm * 24.0f / 60.0f);
-    player->start_beat = current_pulse - current_position_pulses;
-
-    // Reset last_tick_processed to avoid duplicate events after sync
-    int current_tick = (int)(player->position_seconds * player->tempo_bpm * player->ticks_per_quarter / 60.0f);
-    player->last_tick_processed = current_tick;
+    (void)player;
+    (void)current_pulse;
+    // Position is now always calculated from current_beat, no manual sync needed
 }
