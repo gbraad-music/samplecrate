@@ -249,9 +249,20 @@ void midi_file_player_update(MidiFilePlayer* player, float delta_ms, int current
             player->scheduled_start_beat = -1;
             player->playing = true;
             player->start_beat = current_beat;
-            player->position_seconds = 0.0f;
+
+            // Start at the position corresponding to current_beat within the pattern
+            // Pattern length is 384 pulses (64 sixteenth notes = 4 bars at 4/4)
+            // This ensures we start in sync with the SPP pattern position
+            const int PATTERN_LENGTH_PULSES = 384;
+            int pattern_position = current_beat % PATTERN_LENGTH_PULSES;
+
+            // Convert pattern position (pulses) to time (seconds)
+            // At 125 BPM: 1 pulse = 1/(125 * 24/60) seconds = 0.02 seconds
+            float seconds_per_pulse = 60.0f / (player->tempo_bpm * 24.0f);
+            player->position_seconds = pattern_position * seconds_per_pulse;
 
             std::cout << "  Initial state: start_beat=" << player->start_beat
+                      << " pattern_pos=" << pattern_position << "/" << PATTERN_LENGTH_PULSES
                       << " position=" << player->position_seconds << "s" << std::endl;
         } else {
             // Still waiting for the scheduled beat

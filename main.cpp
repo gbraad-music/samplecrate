@@ -830,11 +830,10 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             midi_clock.active = true;  // SPP implies MIDI clock is active
             midi_clock.running = true; // SPP implies transport is running
 
-            // NOTE: SPP is a beat marker for alignment of PLAYING PADS ONLY.
-            // DO NOT adjust total_pulse_count based on SPP - it causes tempo jumps.
-            // SPP position may wrap around and doesn't represent our local timeline.
+            // SPP is a PATTERN position marker - tells us where we are in the repeating loop
+            // We use it to align playback when triggering pads
+            // We do NOT use it to constantly adjust running playback (that causes instability)
 
-            // Extract beat info from SPP (for display only)
             int beat_number = spp_position / 4;  // Convert 16th notes to quarter notes
             int pulse_from_spp = spp_position * 6;  // Each 16th note = 6 MIDI clock pulses
 
@@ -843,26 +842,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                       << " | Local pulse=" << midi_clock.total_pulse_count
                       << std::endl;
 
-            // SPP does NOT affect local pulse count - that continues running based on clock/internal timing
-            // SPP is the PRIMARY sync source - always sync playing pads when SPP arrives
-            // MIDI clock pulses are only used to increment pulse count between SPP messages
-
-            if (midi_pad_player) {
-                int num_synced = 0;
-                for (int i = 0; i < 32; i++) {
-                    if (midi_file_pad_player_is_playing(midi_pad_player, i)) {
-                        num_synced++;
-                    }
-                }
-                if (num_synced > 0) {
-                    // Sync to SPP position, NOT local pulse count
-                    midi_file_pad_player_sync_all(midi_pad_player, pulse_from_spp);
-                    std::cout << "  SPP SYNC: Synced " << num_synced << " playing pad(s) to SPP pulse "
-                              << pulse_from_spp << " (local was " << midi_clock.total_pulse_count << ")" << std::endl;
-                } else {
-                    std::cout << "  No playing pads - ready for quantized trigger" << std::endl;
-                }
-            }
+            // SPP just updates our knowledge of the pattern position
+            // The actual sync happens when pads are triggered (they start at the SPP position)
         } else {
             std::cout << "MIDI SPP received but IGNORED (disabled in settings): position="
                       << spp_position << std::endl;
