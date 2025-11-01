@@ -33,6 +33,11 @@ extern "C" {
 #include "midi_file_pad_player.h"
 }
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+static const char* appname = "SZ16W: Multi-timbral sample/drum sequencer";
+
 // Cross-platform realpath wrapper
 static char* cross_platform_realpath(const char* path, char* resolved_path) {
 #ifdef _WIN32
@@ -1526,7 +1531,10 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
 
-    SDL_Window* window = SDL_CreateWindow("samplecrate", 100, 100, 1200, 640, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    SDL_Window* window = SDL_CreateWindow(
+        appname, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        1200, 640, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
+    );
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1); // Enable vsync
@@ -2007,7 +2015,7 @@ int main(int argc, char* argv[]) {
         ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
         ImGuiWindowFlags rootFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
-        ImGui::Begin("samplecrate", nullptr, rootFlags);
+        ImGui::Begin(appname, nullptr, rootFlags);
 
         // Layout constants (matching mock-ui.cpp)
         const float SIDE_MARGIN = 10.0f;
