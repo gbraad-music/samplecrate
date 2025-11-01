@@ -763,11 +763,15 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                     // Only update tempo if it changed significantly (more than 0.5 BPM)
                     // This prevents constant tiny adjustments that cause timing glitches
                     if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
+                        std::cout << "MIDI CLOCK: BPM changed from " << midi_clock.bpm
+                                  << " to " << new_bpm
+                                  << " (interval=" << total_time << "us for 24 pulses)" << std::endl;
                         midi_clock.bpm = new_bpm;
                         // Only adjust playback tempo if sync is enabled
                         if (config.midi_clock_tempo_sync == 1) {
                             active_bpm = midi_clock.bpm;  // Update active playback tempo
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            std::cout << "  -> active_bpm updated to " << active_bpm << std::endl;
                         }
                     } else {
                         midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
@@ -805,6 +809,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         // Position is in "MIDI beats" (1/16th notes from start of song)
         int spp_position = data1 | (data2 << 7);
         midi_clock.spp_position = spp_position;
+
+        std::cout << "DEBUG: SPP handler called, position=" << spp_position
+                  << ", config.midi_spp_receive=" << config.midi_spp_receive << std::endl;
 
         // Only sync position if SPP receive is enabled
         if (config.midi_spp_receive == 1) {
@@ -853,10 +860,10 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         return;
     }
 
-    // Debug: print all incoming MIDI messages
-    std::cout << "MIDI device " << device_id << ": status=0x" << std::hex << (int)status
-              << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
-              << " channel=" << (channel + 1) << std::endl;
+    // Debug: print all incoming MIDI messages (DISABLED - too noisy)
+    // std::cout << "MIDI device " << device_id << ": status=0x" << std::hex << (int)status
+    //           << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
+    //           << " channel=" << (channel + 1) << std::endl;
 
     // Channel filtering (for channel voice messages, not system messages)
     // System messages (0xF0-0xFF) don't have channels, so we don't filter them
@@ -878,7 +885,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     // Handle program change
     if (msg_type == 0xC0) {  // Program Change
         int program_number = data1;  // 0-127
-        std::cout << "*** PROGRAM CHANGE RECEIVED from device " << device_id << ": program=" << program_number << " ***" << std::endl;
+        // std::cout << "*** PROGRAM CHANGE RECEIVED from device " << device_id << ": program=" << program_number << " ***" << std::endl;
 
         // Check if program change is enabled for this specific device
         // When disabled: UI program selection leads for all MIDI messages from this device
@@ -892,11 +899,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             // Map MIDI program number to our programs (0-3)
             int target_program = program_number % rsx->num_programs;
             midi_target_program[device_id] = target_program;
-            std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
-                      << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
-                      << " - UI remains at program " << (current_program + 1) << std::endl;
+            // std::cout << "    Device " << device_id << " MIDI routed to program " << (target_program + 1)
+            //           << " (MIDI program " << program_number << " mod " << rsx->num_programs << ")"
+            //           << " - UI remains at program " << (current_program + 1) << std::endl;
         } else {
-            std::cout << "    No RSX programs loaded, ignoring Program Change" << std::endl;
+            // std::cout << "    No RSX programs loaded, ignoring Program Change" << std::endl;
         }
         return;
     }
@@ -1072,6 +1079,7 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
         if (midi_clock.active && midi_clock.running) {
             // Check if MIDI clock pulses have stopped (no pulse in last 100ms)
             static uint64_t last_internal_update = 0;
+            static float accumulated_pulses = 0.0f;
             uint64_t now = get_microseconds();
             bool clock_stopped = (midi_clock.last_clock_time > 0) && 
                                 ((now - midi_clock.last_clock_time) > 100000); // 100ms threshold
@@ -1081,19 +1089,34 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
                 // Calculate how many pulses should have elapsed based on time and BPM
                 if (last_internal_update == 0) {
                     last_internal_update = now;
+                    std::cout << "INTERNAL CLOCK: Switching from MIDI clock to internal timing"
+                              << " | active_bpm=" << active_bpm
+                              << " | midi_clock.bpm=" << midi_clock.bpm << std::endl;
                 }
                 
                 uint64_t time_delta = now - last_internal_update;
+
+
                 // Pulses per microsecond = (BPM * 24) / 60000000
                 float pulses_per_us = (active_bpm * 24.0f) / 60000000.0f;
-                int pulse_increment = (int)(time_delta * pulses_per_us);
-                
+                float exact_pulses = time_delta * pulses_per_us;
+                accumulated_pulses += exact_pulses;
+
+                int pulse_increment = (int)accumulated_pulses;
+
                 if (pulse_increment > 0) {
                     midi_clock.total_pulse_count += pulse_increment;
+                    accumulated_pulses -= pulse_increment;  // Keep the fractional part
+                    last_internal_update = now;
+                } else {
+                    // Update timestamp even if no pulse yet (accumulating fractions)
                     last_internal_update = now;
                 }
             } else if (!clock_stopped) {
                 // Clock is running - reset internal timer
+                if (last_internal_update > 0) {
+                    std::cout << "INTERNAL CLOCK: Switching back to MIDI clock" << std::endl;
+                }
                 last_internal_update = 0;
             }
             
