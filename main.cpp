@@ -92,6 +92,9 @@ float active_bpm = 125.0f;  // Actual playback tempo (updated by MIDI clock or m
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
 float note_pad_loop_fade[RSX_MAX_NOTE_PADS] = {0.0f};      // Loop restart fade (blue/cyan)
 
+// Step sequencer visual feedback (16 steps represent 64 rows)
+float step_fade[16] = {0.0f};  // Brightness for each step
+
 // Note suppression state (128 MIDI notes, 0-127)
 // [note][0] = global suppression (program -1)
 // [note][1-4] = per-program suppression for programs 0-3
@@ -106,6 +109,7 @@ struct {
     bool active = false;           // Receiving MIDI clock
     bool running = false;          // Transport running (start/continue)
     float bpm = 0.0f;             // Calculated BPM
+    float smoothed_bpm = 0.0f;    // Smoothed BPM for exponential moving average filter
     uint64_t last_clock_time = 0; // Last clock pulse timestamp (microseconds)
     int pulse_count = 0;          // Pulses since last beat (0-23)
     int beat_count = 0;           // Total quarter note beats since start
@@ -774,6 +778,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         if (sequencer && !midi_clock.active) {
             std::cout << "[MIDI CLOCK] Switching to external clock mode" << std::endl;
             medness_sequencer_set_external_clock(sequencer, 1);
+
+            // Reset BPM smoothing filter when first enabling external clock
+            // This ensures we start fresh with the new clock source
+            midi_clock.bpm = 0.0f;
+            midi_clock.smoothed_bpm = 0.0f;
         }
 
         if (midi_clock.last_clock_time > 0) {
@@ -797,34 +806,36 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
                     // Smooth BPM using exponential moving average to reduce jitter
                     // Alpha = 0.3 gives moderate smoothing (lower = more smoothing)
-                    static float smoothed_bpm = 0.0f;
-                    if (smoothed_bpm == 0.0f) {
-                        smoothed_bpm = raw_bpm;  // Initialize on first reading
+                    if (midi_clock.smoothed_bpm == 0.0f) {
+                        midi_clock.smoothed_bpm = raw_bpm;  // Initialize on first reading
                     } else {
-                        smoothed_bpm = smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
+                        midi_clock.smoothed_bpm = midi_clock.smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
                     }
 
-                    float new_bpm = smoothed_bpm;
+                    float new_bpm = midi_clock.smoothed_bpm;
 
-                    // Only update tempo if it changed significantly (more than 0.5 BPM)
-                    // This prevents constant tiny adjustments that cause timing glitches
-                    if (midi_pad_player && fabs(new_bpm - midi_clock.bpm) > 0.5f) {
-                        std::cout << "MIDI CLOCK: BPM changed from " << midi_clock.bpm
-                                  << " to " << new_bpm
+                    // Update BPM value
+                    bool bpm_changed = fabs(new_bpm - midi_clock.bpm) > 0.1f;
+                    midi_clock.bpm = new_bpm;
+
+                    if (bpm_changed) {
+                        std::cout << "MIDI CLOCK: BPM = " << new_bpm
                                   << " (raw: " << raw_bpm << ", smoothed, interval=" << total_time << "us)" << std::endl;
-                        midi_clock.bpm = new_bpm;
-                        // Only adjust playback tempo if sync is enabled
-                        if (config.midi_clock_tempo_sync == 1) {
-                            active_bpm = midi_clock.bpm;  // Update active playback tempo
-                            tempo_bpm = midi_clock.bpm;   // Update UI slider to match
+                    }
+
+                    // Always update active playback tempo if sync is enabled
+                    if (config.midi_clock_tempo_sync == 1) {
+                        active_bpm = midi_clock.bpm;  // Update active playback tempo
+                        tempo_bpm = midi_clock.bpm;   // Update UI slider to match
+
+                        // Only update sequencer/player if BPM actually changed
+                        if (bpm_changed && midi_pad_player) {
                             if (sequencer) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
-                            std::cout << "  -> active_bpm updated to " << active_bpm << " (UI slider synced)" << std::endl;
+                            std::cout << "  -> active_bpm/tempo_bpm updated to " << active_bpm << std::endl;
                         }
-                    } else {
-                        midi_clock.bpm = new_bpm;  // Update stored BPM but don't retrigger player
                     }
                 }
                 midi_clock.pulse_count = 0;
@@ -846,6 +857,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         midi_clock.beat_count = 0;  // Reset beat counter on start
         midi_clock.total_pulse_count = 0;  // Reset total pulse count for precise sync
         midi_clock.last_bpm_calc_time = get_microseconds();
+        midi_clock.last_clock_time = 0;  // Reset to get fresh timing on first pulse
+        // Don't reset BPM here - keep displaying last known BPM until new one is calculated
 
         // Don't enable external clock mode yet - wait for first 0xF8 pulse
         // If source only sends SPP (no clock), we'll stay in internal mode
@@ -860,6 +873,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         midi_clock.last_clock_time = 0;
         midi_clock.last_bpm_calc_time = 0;
         midi_clock.pulse_count = 0;
+        midi_clock.bpm = 0.0f;  // Reset BPM to prevent displaying stale values
+        midi_clock.smoothed_bpm = 0.0f;  // Reset smoothing filter
 
         // Switch sequencer back to internal clock
         if (sequencer) {
@@ -1930,6 +1945,24 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Update step sequencer fade and highlight current position
+        // 64 rows map to 16 steps (4 rows per step)
+        if (sequencer) {
+            int current_row = medness_sequencer_get_row(sequencer);  // 1-64
+            int current_step = (current_row - 1) / 4;  // 0-15
+
+            // Highlight current step
+            step_fade[current_step] = 1.0f;
+
+            // Fade all steps
+            for (int i = 0; i < 16; i++) {
+                if (step_fade[i] > 0.0f) {
+                    step_fade[i] -= 0.02f;  // Slower fade for sequencer steps
+                    if (step_fade[i] < 0.0f) step_fade[i] = 0.0f;
+                }
+            }
+        }
+
         // NO timeout for MIDI clock - once sync is established, we keep the pulse count going
         // even if external pulses stop. Our internal clock continues, and we catch up when
         // external sync resumes. This prevents any playback interruptions.
@@ -1949,6 +1982,10 @@ int main(int argc, char* argv[]) {
         const float LCD_HEIGHT = 90.0f;
         const float BOTTOM_MARGIN = 8.0f;
 
+        // Sequencer bar constants (matching Regroove)
+        const float SEQUENCER_HEIGHT = 70.0f;
+        const float GAP_ABOVE_SEQUENCER = 8.0f;
+
         float fullW = io.DisplaySize.x;
         float fullH = io.DisplaySize.y;
 
@@ -1957,8 +1994,8 @@ int main(int argc, char* argv[]) {
         float childPaddingY = style.WindowPadding.y * 2.0f;
         float childBorderY = style.ChildBorderSize * 2.0f;
 
-        // No sequencer, so just account for top and bottom margins
-        float channelAreaHeight = fullH - TOP_MARGIN - BOTTOM_MARGIN - childPaddingY - childBorderY;
+        // Account for sequencer bar at bottom
+        float channelAreaHeight = fullH - TOP_MARGIN - BOTTOM_MARGIN - GAP_ABOVE_SEQUENCER - SEQUENCER_HEIGHT - childPaddingY - childBorderY;
         float leftPanelHeight = channelAreaHeight;
 
         // LEFT PANEL (hidden in fullscreen pads mode)
@@ -2245,9 +2282,11 @@ int main(int argc, char* argv[]) {
         float rightX = fullscreen_pads_mode ? 0.0f : (SIDE_MARGIN + LEFT_PANEL_WIDTH + SIDE_MARGIN);
         float rightW = fullscreen_pads_mode ? fullW : (fullW - rightX - SIDE_MARGIN);
 
-        // Calculate dynamic slider width and spacing based on available width (like mock-ui.cpp)
+        // Calculate dynamic slider width and spacing based on available width (like Regroove)
         const float BASE_SLIDER_W = 44.0f;
         const float BASE_SPACING = 26.0f;
+        const float MIN_SLIDER_HEIGHT = 140.0f;
+        const float IMGUI_LAYOUT_COMPENSATION = SEQUENCER_HEIGHT / 2;
         float baseTotal = BASE_SLIDER_W * 9.0f + BASE_SPACING * 8.0f;  // Assumes 9 channels worth of space
         float widthScale = rightW / baseTotal;
         if (widthScale > 1.40f) widthScale = 1.40f;  // Cap maximum scale
@@ -2265,15 +2304,15 @@ int main(int argc, char* argv[]) {
             const float SOLO_SIZE = 34.0f;
             const float MUTE_SIZE = 34.0f;
 
-            // Calculate space needed above and below the slider
-            // Above: Title (labelH) + spacing (4) + solo/fx button (SOLO_SIZE) + spacing (2) + pan slider (panSliderH + labelH) + spacing (2)
-            float sliderTop = labelH + 4.0f + SOLO_SIZE + 2.0f + panSliderH + labelH + 2.0f;
+            // Calculate slider height using Regroove's formula
+            // Above: initial offset (8) + title (labelH) + spacing (4) + solo/fx button (SOLO_SIZE) + spacing (2) + pan slider (panSliderH) + spacing (2)
+            // Note: The original Regroove formula has "+ labelH" after panSliderH for VOL mode, but we remove it for tighter layout
+            float sliderTop = 8.0f + labelH + 4.0f + SOLO_SIZE + 2.0f + panSliderH + 2.0f;
             // Below: spacing (8) + mute button (MUTE_SIZE) + bottom margin (12)
             float bottomStack = 8.0f + MUTE_SIZE + 12.0f;
-            // Available height for slider (with some padding for panel border/padding)
-            float sliderH = leftPanelHeight - sliderTop - bottomStack - 30.0f;
-            if (sliderH < 200.0f) sliderH = 200.0f;  // Minimum height
-            if (sliderH > 400.0f) sliderH = 400.0f;  // Maximum height to prevent running off screen
+            // Available height for slider - use Regroove's exact formula
+            float sliderH = contentHeight - sliderTop - bottomStack - IMGUI_LAYOUT_COMPENSATION;
+            if (sliderH < MIN_SLIDER_HEIGHT) sliderH = MIN_SLIDER_HEIGHT;
 
             if (ui_mode == UI_MODE_INSTRUMENT) {
                 ImGui::Text("CRATE CONFIGURATION");
@@ -2960,19 +2999,76 @@ int main(int argc, char* argv[]) {
             }
             else if (ui_mode == UI_MODE_MIX) {
                 // MIX MODE: Master and playback mixing
-                ImGui::Text("MIX");
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                // sliderW, spacing, sliderH, SOLO_SIZE, MUTE_SIZE are all calculated above
-
+                // No title/separator in MIX mode (like Regroove) - sliderH calculation assumes we start from origin
                 ImVec2 origin = ImGui::GetCursorScreenPos();
+
                 int col_index = 0;
+
+                // TEMPO slider (for MIDI file playback) - First column
+                {
+                    float colX = origin.x + col_index * (sliderW + spacing);
+                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y + 8.0f));
+                    ImGui::BeginGroup();
+                    ImGui::Text("TEMPO");
+                    ImGui::Dummy(ImVec2(0, 4.0f));
+
+                    // Dummy FX button placeholder to match layout
+                    ImGui::Dummy(ImVec2(sliderW, SOLO_SIZE));
+                    ImGui::Dummy(ImVec2(0, 2.0f));
+
+                    // Dummy pan slider placeholder to match layout
+                    ImGui::Dummy(ImVec2(sliderW, panSliderH));
+                    ImGui::Dummy(ImVec2(0, 2.0f));
+
+                    // Tempo slider (50 BPM to 200 BPM)
+                    // Up = faster (200), Down = slower (50)
+                    // Disable slider when external MIDI clock is active
+                    bool is_external_clock = midi_clock.active && midi_clock.running;
+                    if (is_external_clock) {
+                        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);  // Dim the slider
+                    }
+
+                    float prev_tempo = tempo_bpm;
+                    if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
+                        // Only allow changes when external clock is NOT active
+                        if (!is_external_clock && prev_tempo != tempo_bpm && midi_pad_player) {
+                            // Update MIDI file player tempo and active BPM
+                            active_bpm = tempo_bpm;
+                            if (sequencer) {
+                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                            }
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        } else if (is_external_clock) {
+                            // Revert to MIDI clock BPM if user tries to drag during external sync
+                            tempo_bpm = midi_clock.bpm;
+                        }
+                    }
+
+                    if (is_external_clock) {
+                        ImGui::PopStyleVar();
+                    }
+                    ImGui::Dummy(ImVec2(0, 8.0f));
+
+                    // Reset button (reset to default 125 BPM)
+                    if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
+                        tempo_bpm = 125.0f;
+                        if (midi_pad_player) {
+                            active_bpm = tempo_bpm;
+                            if (sequencer) {
+                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                            }
+                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                        }
+                    }
+
+                    ImGui::EndGroup();
+                    col_index++;
+                }
 
                 // MASTER channel
                 {
                     float colX = origin.x + col_index * (sliderW + spacing);
-                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
+                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y + 8.0f));
                     ImGui::BeginGroup();
                     ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f), "MASTER");
                     ImGui::Dummy(ImVec2(0, 4.0f));
@@ -3023,7 +3119,7 @@ int main(int argc, char* argv[]) {
                         if (!program_synths[i]) continue;
 
                         float colX = origin.x + col_index * (sliderW + spacing);
-                        ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
+                        ImGui::SetCursorScreenPos(ImVec2(colX, origin.y + 8.0f));
                         ImGui::BeginGroup();
 
                         // Program name or number
@@ -3092,7 +3188,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     // PLAYBACK channel (single synth mode)
                     float colX = origin.x + col_index * (sliderW + spacing);
-                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
+                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y + 8.0f));
                     ImGui::BeginGroup();
                     ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "PLAYBACK");
                     ImGui::Dummy(ImVec2(0, 4.0f));
@@ -3125,66 +3221,6 @@ int main(int argc, char* argv[]) {
                         mixer.playback_mute = !mixer.playback_mute;
                     }
                     ImGui::PopStyleColor();
-
-                    ImGui::EndGroup();
-                    col_index++;
-                }
-
-                // TEMPO slider (for MIDI file playback)
-                {
-                    float colX = origin.x + col_index * (sliderW + spacing);
-                    ImGui::SetCursorScreenPos(ImVec2(colX, origin.y));
-                    ImGui::BeginGroup();
-                    ImGui::Text("TEMPO");
-                    ImGui::Dummy(ImVec2(0, 4.0f));
-
-                    // Spacer to match other channels (no FX button)
-                    ImGui::Dummy(ImVec2(0, SOLO_SIZE + 2.0f));
-
-                    // Spacer to match pan slider position (20.0f pan slider height)
-                    ImGui::Dummy(ImVec2(sliderW, 20.0f));
-                    ImGui::Dummy(ImVec2(0, 2.0f));
-
-                    // Tempo slider (50 BPM to 200 BPM)
-                    // Up = faster (200), Down = slower (50)
-                    // Disable slider when external MIDI clock is active
-                    bool is_external_clock = midi_clock.active && midi_clock.running;
-                    if (is_external_clock) {
-                        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);  // Dim the slider
-                    }
-
-                    float prev_tempo = tempo_bpm;
-                    if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
-                        // Only allow changes when external clock is NOT active
-                        if (!is_external_clock && prev_tempo != tempo_bpm && midi_pad_player) {
-                            // Update MIDI file player tempo and active BPM
-                            active_bpm = tempo_bpm;
-                            if (sequencer) {
-                                medness_sequencer_set_bpm(sequencer, active_bpm);
-                            }
-                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
-                        } else if (is_external_clock) {
-                            // Revert to MIDI clock BPM if user tries to drag during external sync
-                            tempo_bpm = midi_clock.bpm;
-                        }
-                    }
-
-                    if (is_external_clock) {
-                        ImGui::PopStyleVar();
-                    }
-                    ImGui::Dummy(ImVec2(0, 8.0f));
-
-                    // Reset button (reset to default 125 BPM)
-                    if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
-                        tempo_bpm = 125.0f;
-                        if (midi_pad_player) {
-                            active_bpm = tempo_bpm;
-                            if (sequencer) {
-                                medness_sequencer_set_bpm(sequencer, active_bpm);
-                            }
-                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
-                        }
-                    }
 
                     ImGui::EndGroup();
                     col_index++;
@@ -4576,6 +4612,63 @@ int main(int argc, char* argv[]) {
                 ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f),
                     "Audio device changes require application restart to take effect");
             }
+        }
+        ImGui::EndChild();
+
+        // SEQUENCER BAR (step indicators)
+        // Position below the main panels
+        float sequencerTop = TOP_MARGIN + channelAreaHeight + GAP_ABOVE_SEQUENCER;
+
+        // Debug: Print sequencer position once
+        static bool debug_printed = false;
+        if (!debug_printed) {
+            std::cout << "[SEQUENCER BAR] fullH=" << fullH
+                      << " channelAreaHeight=" << channelAreaHeight
+                      << " sequencerTop=" << sequencerTop
+                      << " SEQUENCER_HEIGHT=" << SEQUENCER_HEIGHT << std::endl;
+            debug_printed = true;
+        }
+
+        ImGui::SetCursorPos(ImVec2(SIDE_MARGIN, sequencerTop));
+        ImGui::BeginChild("sequencer_bar", ImVec2(fullW - 2*SIDE_MARGIN, SEQUENCER_HEIGHT),
+                          true, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+
+        const int numSteps = 16;
+        const float STEP_GAP = 6.0f;
+        const float STEP_MIN = 28.0f;
+        const float STEP_MAX = 60.0f;
+
+        float gap = STEP_GAP;
+        float availWidth = ImGui::GetContentRegionAvail().x;
+        float stepWidth = (availWidth - gap * (numSteps - 1)) / numSteps;
+
+        // Clamp step width
+        if (stepWidth < STEP_MIN) stepWidth = STEP_MIN;
+        if (stepWidth > STEP_MAX) stepWidth = STEP_MAX;
+
+        float rowWidth = numSteps * stepWidth + (numSteps - 1) * gap;
+        float centerOffset = (availWidth - rowWidth) * 0.5f;
+        if (centerOffset < 0) centerOffset = 0;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + centerOffset);
+
+        // Draw 16 step buttons (representing 64 rows, 4 rows per step)
+        for (int i = 0; i < numSteps; ++i) {
+            float brightness = step_fade[i];
+            ImVec4 btnCol = ImVec4(0.18f + brightness * 0.24f,
+                                0.27f + brightness * 0.38f,
+                                0.18f + brightness * 0.24f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, btnCol);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.32f,0.48f,0.32f,1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.42f,0.65f,0.42f,1.0f));
+
+            char label[16];
+            snprintf(label, sizeof(label), "##step%d", i);
+            if (ImGui::Button(label, ImVec2(stepWidth, stepWidth))) {
+                // Click on step - could be used for seeking in the future
+            }
+
+            ImGui::PopStyleColor(3);
+            if (i != numSteps - 1) ImGui::SameLine(0.0f, gap);
         }
         ImGui::EndChild();
 
