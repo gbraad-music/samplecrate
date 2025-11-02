@@ -3971,7 +3971,18 @@ int main(int argc, char* argv[]) {
 
                         ImGui::Button(pad_label, ImVec2(padSize, padSize));
 
+                        // Overlay red rectangle when button is actively pressed (like Regroove)
                         bool is_active = ImGui::IsItemActive();
+                        if (is_active && pad_configured) {
+                            ImVec2 p_min = ImGui::GetItemRectMin();
+                            ImVec2 p_max = ImGui::GetItemRectMax();
+                            ImGui::GetWindowDrawList()->AddRectFilled(p_min, p_max, IM_COL32(220, 40, 40, 180));
+                            // Redraw label on top
+                            ImVec2 text_size = ImGui::CalcTextSize(pad_label);
+                            ImVec2 text_pos = ImVec2((p_min.x + p_max.x - text_size.x) * 0.5f, (p_min.y + p_max.y - text_size.y) * 0.5f);
+                            ImGui::GetWindowDrawList()->AddText(text_pos, IM_COL32(255, 255, 255, 255), pad_label);
+                        }
+
                         bool was_held = (held_pad_index == pad_idx);
                         bool just_clicked = ImGui::IsItemClicked();
 
