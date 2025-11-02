@@ -3811,14 +3811,8 @@ int main(int argc, char* argv[]) {
                 float padH = (availHeight - padSpacing * (NUM_ROWS - 1)) / NUM_ROWS;
                 float padSize = fminf(padW, padH);
 
-                // In fullscreen mode, allow pads to fill available space
-                if (!fullscreen_pads_mode) {
-                    if (padSize > 140.0f) padSize = 140.0f; // Max pad size
-                    if (padSize < 60.0f) padSize = 60.0f;   // Min pad size
-                } else {
-                    // In fullscreen mode, only enforce a minimum for usability
-                    if (padSize < 40.0f) padSize = 40.0f;   // Min pad size for usability
-                }
+                // Allow pads to dynamically fill available space in ALL modes
+                if (padSize < 40.0f) padSize = 40.0f;   // Min pad size for usability
 
                 // Center the grid
                 float gridW = PADS_PER_ROW * padSize + (PADS_PER_ROW - 1) * padSpacing;
