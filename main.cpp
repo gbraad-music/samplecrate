@@ -3297,7 +3297,15 @@ int main(int argc, char* argv[]) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Effects system not initialized");
                 } else {
                     const float fx_spacing = 16.0f;
-                    // sliderW, spacing, sliderH, SOLO_SIZE, MUTE_SIZE are all calculated above
+
+                    // Calculate effects panel specific slider height
+                    // Header section: labelH (mode header) + spacing + separator + spacing
+                    // From origin: 24.0f (to column start, includes group header) + labelH (column label) + 4.0f (spacing) + SOLO_SIZE (enable button) + 6.0f (spacing)
+                    float fx_header = labelH + ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().ItemSpacing.y;
+                    float fx_sliderTop = fx_header + 24.0f + labelH + 4.0f + SOLO_SIZE + 6.0f;
+                    float fx_bottomStack = 8.0f + MUTE_SIZE + 12.0f;
+                    float fx_sliderH = contentHeight - fx_sliderTop - fx_bottomStack - IMGUI_LAYOUT_COMPENSATION;
+                    if (fx_sliderH < MIN_SLIDER_HEIGHT) fx_sliderH = MIN_SLIDER_HEIGHT;
 
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     int col_index = 0;
@@ -3330,7 +3338,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float drive = regroove_effects_get_distortion_drive(effects);
-                        if (ImGui::VSliderFloat("##fx_drive", ImVec2(sliderW, sliderH), &drive, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_drive", ImVec2(sliderW, fx_sliderH), &drive, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_DISTORTION_DRIVE);
                             } else {
@@ -3364,7 +3372,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float mix = regroove_effects_get_distortion_mix(effects);
-                        if (ImGui::VSliderFloat("##fx_dist_mix", ImVec2(sliderW, sliderH), &mix, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_dist_mix", ImVec2(sliderW, fx_sliderH), &mix, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_DISTORTION_MIX);
                             } else {
@@ -3414,7 +3422,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float cutoff = regroove_effects_get_filter_cutoff(effects);
-                        if (ImGui::VSliderFloat("##fx_cutoff", ImVec2(sliderW, sliderH), &cutoff, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_cutoff", ImVec2(sliderW, fx_sliderH), &cutoff, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_FILTER_CUTOFF);
                             } else {
@@ -3446,7 +3454,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float reso = regroove_effects_get_filter_resonance(effects);
-                        if (ImGui::VSliderFloat("##fx_reso", ImVec2(sliderW, sliderH), &reso, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_reso", ImVec2(sliderW, fx_sliderH), &reso, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_FILTER_RESONANCE);
                             } else {
@@ -3496,7 +3504,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float eq_low = regroove_effects_get_eq_low(effects);
-                        if (ImGui::VSliderFloat("##fx_eq_low", ImVec2(sliderW, sliderH), &eq_low, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_eq_low", ImVec2(sliderW, fx_sliderH), &eq_low, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_EQ_LOW);
                             } else {
@@ -3528,7 +3536,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float eq_mid = regroove_effects_get_eq_mid(effects);
-                        if (ImGui::VSliderFloat("##fx_eq_mid", ImVec2(sliderW, sliderH), &eq_mid, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_eq_mid", ImVec2(sliderW, fx_sliderH), &eq_mid, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_EQ_MID);
                             } else {
@@ -3560,7 +3568,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float eq_high = regroove_effects_get_eq_high(effects);
-                        if (ImGui::VSliderFloat("##fx_eq_high", ImVec2(sliderW, sliderH), &eq_high, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_eq_high", ImVec2(sliderW, fx_sliderH), &eq_high, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_EQ_HIGH);
                             } else {
@@ -3610,7 +3618,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float thresh = regroove_effects_get_compressor_threshold(effects);
-                        if (ImGui::VSliderFloat("##fx_comp_thresh", ImVec2(sliderW, sliderH), &thresh, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_comp_thresh", ImVec2(sliderW, fx_sliderH), &thresh, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_COMPRESSOR_THRESHOLD);
                             } else {
@@ -3642,7 +3650,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float ratio = regroove_effects_get_compressor_ratio(effects);
-                        if (ImGui::VSliderFloat("##fx_comp_ratio", ImVec2(sliderW, sliderH), &ratio, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_comp_ratio", ImVec2(sliderW, fx_sliderH), &ratio, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_COMPRESSOR_RATIO);
                             } else {
@@ -3692,7 +3700,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float delay_time = regroove_effects_get_delay_time(effects);
-                        if (ImGui::VSliderFloat("##fx_delay_time", ImVec2(sliderW, sliderH), &delay_time, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_delay_time", ImVec2(sliderW, fx_sliderH), &delay_time, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_DELAY_TIME);
                             } else {
@@ -3724,7 +3732,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float feedback = regroove_effects_get_delay_feedback(effects);
-                        if (ImGui::VSliderFloat("##fx_delay_fb", ImVec2(sliderW, sliderH), &feedback, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_delay_fb", ImVec2(sliderW, fx_sliderH), &feedback, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_DELAY_FEEDBACK);
                             } else {
@@ -3756,7 +3764,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 6.0f));
 
                         float delay_mix = regroove_effects_get_delay_mix(effects);
-                        if (ImGui::VSliderFloat("##fx_delay_mix", ImVec2(sliderW, sliderH), &delay_mix, 0.0f, 1.0f, "")) {
+                        if (ImGui::VSliderFloat("##fx_delay_mix", ImVec2(sliderW, fx_sliderH), &delay_mix, 0.0f, 1.0f, "")) {
                             if (learn_mode_active && ImGui::IsItemActive()) {
                                 start_learn_for_action(ACTION_FX_DELAY_MIX);
                             } else {
