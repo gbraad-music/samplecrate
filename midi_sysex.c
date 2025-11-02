@@ -54,7 +54,7 @@ int sysex_parse_message(const uint8_t *msg, size_t msg_len) {
     const uint8_t *data = (msg_len > 5) ? &msg[4] : NULL;
     size_t data_len = (msg_len > 5) ? (msg_len - 5) : 0;
 
-    printf("[SysEx] Received %s from device %d (data_len=%zu)\n",
+    printf("[SysEx] Received %s for device %d (data_len=%zu)\n",
            sysex_command_name((SysExCommand)command), device_id, data_len);
 
     // Call registered callback

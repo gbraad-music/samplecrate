@@ -810,7 +810,7 @@ static uint64_t get_microseconds() {
 
 // SysEx callback for remote control
 void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data, size_t data_len, void *userdata) {
-    printf("[SysEx] Received command: %s from device %d\n", sysex_command_name(command), device_id);
+    printf("[SysEx] Received command: %s for device %d\n", sysex_command_name(command), device_id);
 
     switch (command) {
         case SYSEX_CMD_FILE_LOAD: {
@@ -822,8 +822,50 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                     filename[filename_len] = '\0';
                     printf("[SysEx] Loading RSX file: %s\n", filename);
 
+                    // If filename is not an absolute path, prepend the directory of the current RSX file
+                    char full_path[1024];
+                    if (filename[0] == '/' || filename[0] == '\\' ||
+                        (strlen(filename) > 2 && filename[1] == ':')) {
+                        // Already absolute path
+                        strncpy(full_path, filename, sizeof(full_path) - 1);
+                    } else {
+                        // Relative path - use the same directory as the current RSX file
+                        if (!rsx_file_path.empty()) {
+                            // Extract directory from current RSX file path
+                            std::string dir = rsx_file_path;
+                            size_t last_slash = dir.find_last_of("/\\");
+                            if (last_slash != std::string::npos) {
+                                dir = dir.substr(0, last_slash);
+#ifdef _WIN32
+                                snprintf(full_path, sizeof(full_path), "%s\\%s", dir.c_str(), filename);
+#else
+                                snprintf(full_path, sizeof(full_path), "%s/%s", dir.c_str(), filename);
+#endif
+                            } else {
+                                // No directory in path, just use filename
+                                strncpy(full_path, filename, sizeof(full_path) - 1);
+                            }
+                        } else {
+                            // No RSX loaded yet, use current working directory
+                            char cwd[512];
+                            if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+#ifdef _WIN32
+                                snprintf(full_path, sizeof(full_path), "%s\\%s", cwd, filename);
+#else
+                                snprintf(full_path, sizeof(full_path), "%s/%s", cwd, filename);
+#endif
+                            } else {
+                                // Fallback to just the filename
+                                strncpy(full_path, filename, sizeof(full_path) - 1);
+                            }
+                        }
+                    }
+                    full_path[sizeof(full_path) - 1] = '\0';
+
+                    printf("[SysEx] Full path: %s\n", full_path);
+
                     // Load the RSX file
-                    if (rsx && samplecrate_rsx_load(rsx, filename) == 0) {
+                    if (rsx && samplecrate_rsx_load(rsx, full_path) == 0) {
                         printf("[SysEx] Successfully loaded: %s\n", filename);
                         // Reload programs
                         for (int i = 0; i < rsx->num_programs; i++) {
