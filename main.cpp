@@ -1,4 +1,5 @@
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl2.h"
 #include <SDL.h>
@@ -2385,6 +2386,8 @@ int main(int argc, char* argv[]) {
         bool show_border = !fullscreen_pads_mode;  // Remove border in fullscreen mode so bar is flush against edge
         ImGui::BeginChild("right_panel", ImVec2(rightW, actualChannelAreaHeight), show_border, ImGuiWindowFlags_NoScrollbar);
         {
+            ImVec2 origin = ImGui::GetCursorPos();
+
             float labelH = ImGui::GetTextLineHeight();
             float contentHeight = actualChannelAreaHeight - childPaddingY;
             float panSliderH = 20.0f;  // Height for horizontal pan slider
@@ -3828,8 +3831,6 @@ int main(int argc, char* argv[]) {
                 // Normal mode: 16 pads (N1-N16) in 4x4 grid
                 // Expanded mode: 32 pads (N1-N32) in 4x8 grid
 
-                ImVec2 origin = ImGui::GetCursorPos();
-
                 // Calculate pad layout
                 int PADS_PER_ROW, NUM_ROWS, total_pads;
                 if (fullscreen_pads_mode) {
@@ -3864,9 +3865,8 @@ int main(int argc, char* argv[]) {
                 // Center the grid
                 float gridW = PADS_PER_ROW * padSize + (PADS_PER_ROW - 1) * padSpacing;
                 float gridH = NUM_ROWS * padSize + (NUM_ROWS - 1) * padSpacing;
-                // Use relative positioning within the child window, not screen coordinates
-                float startX = (rightW - gridW) * 0.5f;
-                float startY = (contentHeight - gridH) * 0.5f;
+                float startX = origin.x + (rightW - gridW) * 0.5f;
+                float startY = origin.y + (contentHeight - gridH) * 0.5f;
 
                 // Draw trigger pads
                 for (int row = 0; row < NUM_ROWS; row++) {
@@ -3874,7 +3874,7 @@ int main(int argc, char* argv[]) {
                         int idx = row * PADS_PER_ROW + col;
                         if (idx >= total_pads) break;
 
-                        // Calculate position relative to child window (not screen space)
+                        // Calculate position relative to child window
                         float posX = startX + col * (padSize + padSpacing);
                         float posY = startY + row * (padSize + padSpacing);
 
@@ -3941,7 +3941,6 @@ int main(int argc, char* argv[]) {
                         }
 
                         ImGui::PushStyleColor(ImGuiCol_Button, pad_col);
-                        ImGui::PushID(pad_idx);
 
                         // Pad label
                         char pad_label[128];
@@ -4025,18 +4024,28 @@ int main(int argc, char* argv[]) {
                             snprintf(pad_label, sizeof(pad_label), "N%d\n\n[Not Set]", pad_idx + 1);
                         }
 
-                        ImGui::Button(pad_label, ImVec2(padSize, padSize));
+                        // Add unique ID suffix so ImGui can distinguish buttons with same label
+                        char button_id[256];
+                        snprintf(button_id, sizeof(button_id), "%s##pad%d", pad_label, idx);
+                        ImGui::Button(button_id, ImVec2(padSize, padSize));
 
-                        // Overlay red rectangle when button is actively pressed (like Regroove)
+                        // Overlay red rectangle when button is actively pressed (exactly like Regroove)
                         bool is_active = ImGui::IsItemActive();
                         if (is_active && pad_configured) {
                             ImVec2 p_min = ImGui::GetItemRectMin();
                             ImVec2 p_max = ImGui::GetItemRectMax();
-                            ImGui::GetWindowDrawList()->AddRectFilled(p_min, p_max, IM_COL32(220, 40, 40, 180));
-                            // Redraw label on top
-                            ImVec2 text_size = ImGui::CalcTextSize(pad_label);
-                            ImVec2 text_pos = ImVec2((p_min.x + p_max.x - text_size.x) * 0.5f, (p_min.y + p_max.y - text_size.y) * 0.5f);
-                            ImGui::GetWindowDrawList()->AddText(text_pos, IM_COL32(255, 255, 255, 255), pad_label);
+                            const ImGuiStyle& style = ImGui::GetStyle();
+
+                            // Draw rounded rectangle overlay matching the button's FrameRounding
+                            ImGui::GetWindowDrawList()->AddRectFilled(p_min, p_max, IM_COL32(220, 40, 40, 180), style.FrameRounding);
+
+                            // Redraw label using the EXACT same internal function ImGui uses for buttons
+                            ImVec2 label_size = ImGui::CalcTextSize(pad_label, NULL, true);
+                            ImVec2 text_min = ImVec2(p_min.x + style.FramePadding.x, p_min.y + style.FramePadding.y);
+                            ImVec2 text_max = ImVec2(p_max.x - style.FramePadding.x, p_max.y - style.FramePadding.y);
+                            ImRect clip_rect(p_min, p_max);
+                            ImGui::RenderTextClipped(text_min, text_max, pad_label, NULL, &label_size,
+                                                     style.ButtonTextAlign, &clip_rect);
                         }
 
                         bool was_held = (held_pad_index == pad_idx);
@@ -4143,7 +4152,6 @@ int main(int argc, char* argv[]) {
                             }
                         }
 
-                        ImGui::PopID();
                         ImGui::PopStyleColor();
                     }
                 }
@@ -4153,8 +4161,8 @@ int main(int argc, char* argv[]) {
                 float barWidth = 12.0f;
                 ImVec2 cursorBeforeBar = ImGui::GetCursorPos();
 
-                // Bar should span from origin.y to the available height
-                float barHeight = contentHeight - origin.y;
+                // Bar should span the full content height (like Regroove)
+                float barHeight = contentHeight;
 
                 if (!fullscreen_pads_mode) {
                     // Enter fullscreen bar
