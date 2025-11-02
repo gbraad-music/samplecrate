@@ -33,6 +33,7 @@ extern "C" {
 #include "medness_sequencer.h"
 #include "midi_file_player.h"
 #include "midi_file_pad_player.h"
+#include "midi_sysex.h"
 }
 
 // -----------------------------------------------------------------------------
@@ -805,6 +806,47 @@ static uint64_t get_microseconds() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()
     ).count();
+}
+
+// SysEx callback for remote control
+void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data, size_t data_len, void *userdata) {
+    printf("[SysEx] Received command: %s from device %d\n", sysex_command_name(command), device_id);
+
+    switch (command) {
+        case SYSEX_CMD_FILE_LOAD: {
+            if (data_len >= 2) {
+                uint8_t filename_len = data[0];
+                if (filename_len > 0 && data_len >= (size_t)(1 + filename_len)) {
+                    char filename[256] = {0};
+                    memcpy(filename, &data[1], filename_len);
+                    filename[filename_len] = '\0';
+                    printf("[SysEx] Loading RSX file: %s\n", filename);
+
+                    // Load the RSX file
+                    if (rsx && samplecrate_rsx_load(rsx, filename) == 0) {
+                        printf("[SysEx] Successfully loaded: %s\n", filename);
+                        // Reload programs
+                        for (int i = 0; i < rsx->num_programs; i++) {
+                            reload_program(i);
+                        }
+                        load_note_suppression_from_rsx();
+                        current_program = 0;
+                    } else {
+                        printf("[SysEx] Failed to load: %s\n", filename);
+                    }
+                }
+            }
+            break;
+        }
+
+        case SYSEX_CMD_PING:
+            printf("[SysEx] PING received\n");
+            break;
+
+        default:
+            printf("[SysEx] Unhandled command: 0x%02X\n", command);
+            break;
+    }
 }
 
 // MIDI event callback from midi.c
@@ -1954,6 +1996,11 @@ int main(int argc, char* argv[]) {
         midi_device_ports[0] = config.midi_device_0;
         midi_device_ports[1] = config.midi_device_1;
         midi_device_ports[2] = config.midi_device_2;
+
+        // Initialize SysEx system with device ID 0 (can be changed in UI)
+        sysex_init(0);
+        sysex_register_callback(sysex_callback, nullptr);
+        std::cout << "SysEx initialized (device ID: " << (int)sysex_get_device_id() << ")" << std::endl;
 
         if (midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES) == 0) {
             std::cout << "MIDI initialized successfully" << std::endl;

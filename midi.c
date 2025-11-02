@@ -1,4 +1,5 @@
 #include "midi.h"
+#include "midi_sysex.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <rtmidi_c.h>
@@ -7,55 +8,49 @@ static RtMidiInPtr midiin[MIDI_MAX_DEVICES] = {NULL};
 static MidiEventCallback midi_cb = NULL;
 static void *cb_userdata = NULL;
 
-// Device-specific callback wrappers
-static void rtmidi_event_callback_0(double dt, const unsigned char *msg, size_t sz, void *userdata) {
-    if (midi_cb && sz >= 1) {
+// Common MIDI event handler with SysEx support
+static void handle_midi_event(int device_id, double dt, const unsigned char *msg, size_t sz) {
+    if (sz < 1) return;
+
+    // Handle SysEx messages (0xF0 ... 0xF7)
+    if (sz >= 5 && msg[0] == 0xF0) {
+        // Try to parse as Samplecrate SysEx message
+        if (sysex_parse_message(msg, sz)) {
+            // Message was handled by SysEx subsystem
+            return;
+        }
+        // Otherwise, fall through to regular handling
+    }
+
+    // Handle regular MIDI messages
+    if (midi_cb) {
         // Handle Song Position Pointer (0xF2 + LSB + MSB)
         if (sz == 3 && msg[0] == 0xF2) {
             // SPP is a special 3-byte message: combine the two 7-bit data bytes
             // Position is in "MIDI beats" (1/16th notes), LSB first
             unsigned char data1 = msg[1] & 0x7F;  // LSB
             unsigned char data2 = msg[2] & 0x7F;  // MSB
-            midi_cb(msg[0], data1, data2, 0, cb_userdata);
+            midi_cb(msg[0], data1, data2, device_id, cb_userdata);
             return;
         }
 
         unsigned char data1 = (sz >= 2) ? msg[1] : 0;
         unsigned char data2 = (sz >= 3) ? msg[2] : 0;
-        midi_cb(msg[0], data1, data2, 0, cb_userdata);
+        midi_cb(msg[0], data1, data2, device_id, cb_userdata);
     }
+}
+
+// Device-specific callback wrappers
+static void rtmidi_event_callback_0(double dt, const unsigned char *msg, size_t sz, void *userdata) {
+    handle_midi_event(0, dt, msg, sz);
 }
 
 static void rtmidi_event_callback_1(double dt, const unsigned char *msg, size_t sz, void *userdata) {
-    if (midi_cb && sz >= 1) {
-        // Handle Song Position Pointer (0xF2 + LSB + MSB)
-        if (sz == 3 && msg[0] == 0xF2) {
-            unsigned char data1 = msg[1] & 0x7F;  // LSB
-            unsigned char data2 = msg[2] & 0x7F;  // MSB
-            midi_cb(msg[0], data1, data2, 1, cb_userdata);
-            return;
-        }
-
-        unsigned char data1 = (sz >= 2) ? msg[1] : 0;
-        unsigned char data2 = (sz >= 3) ? msg[2] : 0;
-        midi_cb(msg[0], data1, data2, 1, cb_userdata);
-    }
+    handle_midi_event(1, dt, msg, sz);
 }
 
 static void rtmidi_event_callback_2(double dt, const unsigned char *msg, size_t sz, void *userdata) {
-    if (midi_cb && sz >= 1) {
-        // Handle Song Position Pointer (0xF2 + LSB + MSB)
-        if (sz == 3 && msg[0] == 0xF2) {
-            unsigned char data1 = msg[1] & 0x7F;  // LSB
-            unsigned char data2 = msg[2] & 0x7F;  // MSB
-            midi_cb(msg[0], data1, data2, 2, cb_userdata);
-            return;
-        }
-
-        unsigned char data1 = (sz >= 2) ? msg[1] : 0;
-        unsigned char data2 = (sz >= 3) ? msg[2] : 0;
-        midi_cb(msg[0], data1, data2, 2, cb_userdata);
-    }
+    handle_midi_event(2, dt, msg, sz);
 }
 
 int midi_list_ports(void) {

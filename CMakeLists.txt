@@ -59,6 +59,7 @@ add_executable(samplecrate
     midi.c
     input_mappings.c
     sfz_builder.c
+    midi_sysex.c
     medness_track.cpp
     medness_sequencer.cpp
     midi_file_player.cpp
