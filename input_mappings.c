@@ -13,6 +13,7 @@ InputAction parse_action(const char *str) {
     if (strcmp(str, "file_prev") == 0) return ACTION_FILE_PREV;
     if (strcmp(str, "file_next") == 0) return ACTION_FILE_NEXT;
     if (strcmp(str, "file_load") == 0) return ACTION_FILE_LOAD;
+    if (strcmp(str, "file_load_byname") == 0) return ACTION_FILE_LOAD_BYNAME;
     if (strcmp(str, "fx_distortion_drive") == 0) return ACTION_FX_DISTORTION_DRIVE;
     if (strcmp(str, "fx_distortion_mix") == 0) return ACTION_FX_DISTORTION_MIX;
     if (strcmp(str, "fx_filter_cutoff") == 0) return ACTION_FX_FILTER_CUTOFF;
@@ -51,6 +52,7 @@ const char* input_action_name(InputAction action) {
         case ACTION_FILE_PREV: return "file_prev";
         case ACTION_FILE_NEXT: return "file_next";
         case ACTION_FILE_LOAD: return "file_load";
+        case ACTION_FILE_LOAD_BYNAME: return "file_load_byname";
         case ACTION_FX_DISTORTION_DRIVE: return "fx_distortion_drive";
         case ACTION_FX_DISTORTION_MIX: return "fx_distortion_mix";
         case ACTION_FX_FILTER_CUTOFF: return "fx_filter_cutoff";
@@ -127,9 +129,10 @@ void input_mappings_reset_defaults(InputMappings *mappings) {
     // Initialize trigger pads with default configuration
     for (int i = 0; i < MAX_TRIGGER_PADS; i++) {
         mappings->trigger_pads[i].action = ACTION_NONE;
-        mappings->trigger_pads[i].parameter = 0;
+        mappings->trigger_pads[i].parameters[0] = '\0';
         mappings->trigger_pads[i].midi_note = -1;
         mappings->trigger_pads[i].midi_device = -1;
+        mappings->trigger_pads[i].phrase_index = -1;
     }
 
     // Default MIDI mappings (based on current implementation)
@@ -177,9 +180,10 @@ int input_mappings_load(InputMappings *mappings, const char *filepath) {
     // Reset trigger pads to defaults
     for (int i = 0; i < MAX_TRIGGER_PADS; i++) {
         mappings->trigger_pads[i].action = ACTION_NONE;
-        mappings->trigger_pads[i].parameter = 0;
+        mappings->trigger_pads[i].parameters[0] = '\0';
         mappings->trigger_pads[i].midi_note = -1;
         mappings->trigger_pads[i].midi_device = -1;
+        mappings->trigger_pads[i].phrase_index = -1;
     }
 
     while (fgets(line, sizeof(line), f)) {
@@ -300,40 +304,53 @@ int input_mappings_load(InputMappings *mappings, const char *filepath) {
                 }
             }
         } else if (section == SECTION_TRIGGER_PADS) {
-            // Format: pad<number> = action[,parameter[,midi_note[,midi_device]]]
+            // NEW FORMAT: pad<number> = action,parameters,midi_note,midi_device
+            // Where parameters is semicolon-separated values (e.g., "60;100;1;-1" for trigger_note_pad)
             if (strncmp(key, "pad", 3) == 0) {
                 int pad_num = atoi(key + 3);
                 if (pad_num < 1 || pad_num > MAX_TRIGGER_PADS) continue;
                 int pad_idx = pad_num - 1; // Convert to 0-based index
 
-                char action_str[64];
-                int param = 0, midi_note = -1, midi_device = -1;
+                char value_copy[512];
+                strncpy(value_copy, value, sizeof(value_copy) - 1);
+                value_copy[sizeof(value_copy) - 1] = '\0';
 
-                strncpy(action_str, value, sizeof(action_str) - 1);
-                action_str[sizeof(action_str) - 1] = '\0';
-
-                char *tok = strtok(action_str, ",");
+                // First token: action
+                char *tok = strtok(value_copy, ",");
                 if (!tok) continue;
+                InputAction action = parse_action(trim(tok));
 
-                char trimmed_tok[64];
-                strncpy(trimmed_tok, tok, sizeof(trimmed_tok) - 1);
-                trimmed_tok[sizeof(trimmed_tok) - 1] = '\0';
-                InputAction action = parse_action(trim(trimmed_tok));
-
+                // Second token: parameters (semicolon-separated, stored as-is)
                 tok = strtok(NULL, ",");
-                if (tok) param = atoi(tok);
+                char parameters[512] = "";
+                if (tok) {
+                    strncpy(parameters, trim(tok), sizeof(parameters) - 1);
+                    parameters[sizeof(parameters) - 1] = '\0';
+                }
 
+                // Third token: midi_note
                 tok = strtok(NULL, ",");
-                if (tok) midi_note = atoi(tok);
+                int midi_note = -1;
+                if (tok) midi_note = atoi(trim(tok));
 
+                // Fourth token: midi_device
                 tok = strtok(NULL, ",");
-                if (tok) midi_device = atoi(tok);
+                int midi_device = -1;
+                if (tok) midi_device = atoi(trim(tok));
 
                 // Set trigger pad configuration
                 mappings->trigger_pads[pad_idx].action = action;
-                mappings->trigger_pads[pad_idx].parameter = param;
+                strncpy(mappings->trigger_pads[pad_idx].parameters, parameters,
+                        sizeof(mappings->trigger_pads[pad_idx].parameters) - 1);
+                mappings->trigger_pads[pad_idx].parameters[sizeof(mappings->trigger_pads[pad_idx].parameters) - 1] = '\0';
                 mappings->trigger_pads[pad_idx].midi_note = midi_note;
                 mappings->trigger_pads[pad_idx].midi_device = midi_device;
+
+                // Debug output for FILE_LOAD_BYNAME
+                if (action == ACTION_FILE_LOAD_BYNAME) {
+                    printf("Loaded pad%d: action=%s, parameters='%s', midi_note=%d, midi_device=%d\n",
+                           pad_num, input_action_name(action), parameters, midi_note, midi_device);
+                }
             }
         }
     }
@@ -401,16 +418,32 @@ int input_mappings_save(InputMappings *mappings, const char *filepath) {
     }
 
     fprintf(f, "\n[trigger_pads]\n");
-    fprintf(f, "# Format: pad<number> = action[,parameter[,midi_note[,midi_device]]]\n");
-    fprintf(f, "# midi_note: -1 = not mapped, 0-127 = MIDI note number\n");
-    fprintf(f, "# midi_device: -1 = any device (default), 0 = device 0, 1 = device 1\n\n");
+    fprintf(f, "# Format: pad<number> = action,parameters,midi_note,midi_device\n");
+    fprintf(f, "#\n");
+    fprintf(f, "# action: the action to trigger (see ACTION_* enums)\n");
+    fprintf(f, "# parameters: semicolon-separated values (parsed based on action type)\n");
+    fprintf(f, "#   - trigger_note_pad: note;velocity;program;channel (e.g., 60;100;1;-1)\n");
+    fprintf(f, "#   - file_load_byname: filename (e.g., song.rsx)\n");
+    fprintf(f, "#   - Other actions: action-specific parameters\n");
+    fprintf(f, "# midi_note: -1 = not mapped, 0-127 = MIDI note that triggers this pad\n");
+    fprintf(f, "# midi_device: -1 = any device, 0 = device 0, 1 = device 1\n");
+    fprintf(f, "#\n");
+    fprintf(f, "# Examples:\n");
+    fprintf(f, "#   pad1 = trigger_note_pad,60;100;1;-1,36,-1  # Triggers MIDI note 60, vel 100, prog 1 when MIDI note 36 received\n");
+    fprintf(f, "#   pad2 = file_load_byname,song.rsx,48,-1     # Loads song.rsx when MIDI note 48 received\n\n");
 
     for (int i = 0; i < MAX_TRIGGER_PADS; i++) {
         TriggerPadConfig *p = &mappings->trigger_pads[i];
-        fprintf(f, "pad%d = %s,%d,%d,%d\n",
+
+        // Skip pads with no action
+        if (p->action == ACTION_NONE && p->parameters[0] == '\0' && p->midi_note == -1) {
+            continue;
+        }
+
+        fprintf(f, "pad%d = %s,%s,%d,%d\n",
                 i + 1,
                 input_action_name(p->action),
-                p->parameter,
+                p->parameters,
                 p->midi_note,
                 p->midi_device);
     }
@@ -454,4 +487,37 @@ int input_mappings_get_keyboard_event(InputMappings *mappings, int key, InputEve
     }
 
     return 0;
+}
+
+// Parse ACTION_TRIGGER_NOTE_PAD parameters: "note;velocity;program;channel"
+void parse_note_pad_params(const char *params, int *note, int *velocity, int *program, int *channel) {
+    // Set defaults
+    if (note) *note = 60;        // Middle C
+    if (velocity) *velocity = 100;
+    if (program) *program = 0;    // 0 = use current/any
+    if (channel) *channel = -1;   // -1 = omni
+
+    if (!params || params[0] == '\0') return;
+
+    char params_copy[512];
+    strncpy(params_copy, params, sizeof(params_copy) - 1);
+    params_copy[sizeof(params_copy) - 1] = '\0';
+
+    char *tok = strtok(params_copy, ";");
+    if (tok && note) *note = atoi(tok);
+
+    tok = strtok(NULL, ";");
+    if (tok && velocity) *velocity = atoi(tok);
+
+    tok = strtok(NULL, ";");
+    if (tok && program) *program = atoi(tok);
+
+    tok = strtok(NULL, ";");
+    if (tok && channel) *channel = atoi(tok);
+}
+
+// Serialize ACTION_TRIGGER_NOTE_PAD parameters to string
+void serialize_note_pad_params(char *out, size_t out_size, int note, int velocity, int program, int channel) {
+    if (!out || out_size == 0) return;
+    snprintf(out, out_size, "%d;%d;%d;%d", note, velocity, program, channel);
 }

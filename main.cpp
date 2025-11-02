@@ -12,6 +12,7 @@
 #include <mutex>
 #include <chrono>
 #include <libgen.h>
+#include <sys/stat.h>
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -714,6 +715,44 @@ void handle_input_event(InputEvent* event) {
                 switch_program(next_prog);
             }
             break;
+
+        case ACTION_FILE_LOAD_BYNAME: {
+            // Parameter is the pad index - look up the filename from the pad config
+            int pad_index = event->parameter;
+            if (pad_index >= 0 && pad_index < MAX_TRIGGER_PADS && input_mappings) {
+                TriggerPadConfig *pad = &input_mappings->trigger_pads[pad_index];
+                if (pad->parameters[0] != '\0') {
+                    const char* filename = pad->parameters;
+                    printf("ACTION_FILE_LOAD_BYNAME: pad_index=%d, filename='%s'\n", pad_index, filename);
+
+                    // Check if file exists using stat
+                    struct stat buffer;
+                    if (stat(filename, &buffer) == 0) {
+                        // Unload current RSX if loaded
+                        if (rsx) {
+                            samplecrate_rsx_destroy(rsx);
+                            rsx = nullptr;
+                        }
+
+                        // Create and load new RSX file
+                        rsx = samplecrate_rsx_create();
+                        if (samplecrate_rsx_load(rsx, filename) == 0) {
+                            rsx_file_path = filename;
+                            printf("Loaded RSX: %s\n", filename);
+                        } else {
+                            fprintf(stderr, "Failed to load RSX: %s\n", filename);
+                            samplecrate_rsx_destroy(rsx);
+                            rsx = nullptr;
+                        }
+                    } else {
+                        fprintf(stderr, "File not found: %s\n", filename);
+                    }
+                } else {
+                    printf("ACTION_FILE_LOAD_BYNAME: pad_index=%d has empty parameters\n", pad_index);
+                }
+            }
+            break;
+        }
 
         // Note suppression toggle
         case ACTION_NOTE_SUPPRESS_TOGGLE: {

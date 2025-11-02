@@ -1,6 +1,8 @@
 #ifndef INPUT_MAPPINGS_H
 #define INPUT_MAPPINGS_H
 
+#include <stddef.h>
+
 // Action types that can be triggered by inputs
 typedef enum {
     ACTION_NONE = 0,
@@ -8,6 +10,7 @@ typedef enum {
     ACTION_FILE_PREV,
     ACTION_FILE_NEXT,
     ACTION_FILE_LOAD,
+    ACTION_FILE_LOAD_BYNAME,   // parameter = pad index (filename stored in parameters)
     // Effects actions (continuous, use MIDI value 0-127)
     ACTION_FX_DISTORTION_DRIVE,    // distortion drive amount
     ACTION_FX_DISTORTION_MIX,      // distortion dry/wet mix
@@ -78,7 +81,7 @@ typedef struct {
 
 typedef struct {
     InputAction action;      // Action to trigger (ACTION_NONE if using phrase)
-    int parameter;           // Action parameter (channel index, etc.)
+    char parameters[512];    // Semicolon-separated parameters for the action (parsed based on action type)
     int midi_note;           // MIDI note number that triggers this pad (-1 = not mapped)
     int midi_device;         // Which MIDI device (-1 = any)
     int phrase_index;        // Index into phrases array (-1 = not using phrase, use action instead)
@@ -119,5 +122,12 @@ const char* input_action_name(InputAction action);
 
 // Parse action name to enum (for loading from files)
 InputAction parse_action(const char *str);
+
+// Helper functions for parsing trigger pad parameters
+// Parse ACTION_TRIGGER_NOTE_PAD parameters: "note;velocity;program;channel"
+void parse_note_pad_params(const char *params, int *note, int *velocity, int *program, int *channel);
+
+// Serialize ACTION_TRIGGER_NOTE_PAD parameters to string
+void serialize_note_pad_params(char *out, size_t out_size, int note, int velocity, int program, int channel);
 
 #endif // INPUT_MAPPINGS_H
