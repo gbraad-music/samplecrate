@@ -2,6 +2,163 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#else
+#include <dirent.h>
+#endif
+
+// Helper: Check if file is a valid samplecrate file (.rsx or .sfz)
+static int is_samplecrate_file(const char *filename) {
+    const char *dot = strrchr(filename, '.');
+    if (!dot) return 0;
+
+    char ext[16];
+    snprintf(ext, sizeof(ext), "%s", dot);
+    for (char *p = ext; *p; ++p) *p = tolower(*p);
+
+    return (strcmp(ext, ".rsx") == 0 || strcmp(ext, ".sfz") == 0);
+}
+
+// Helper: Normalize directory path (remove trailing slash)
+static void normalize_directory_path(char *path) {
+    if (!path) return;
+
+    size_t len = strlen(path);
+    while (len > 0 && (path[len-1] == '/' || path[len-1] == '\\')) {
+        path[--len] = '\0';
+    }
+}
+
+// File list management
+SamplecrateFileList* samplecrate_filelist_create(void) {
+    SamplecrateFileList *list = calloc(1, sizeof(SamplecrateFileList));
+    if (!list) return NULL;
+
+    list->filenames = calloc(COMMON_MAX_FILES, sizeof(char*));
+    if (!list->filenames) {
+        free(list);
+        return NULL;
+    }
+
+    return list;
+}
+
+int samplecrate_filelist_load(SamplecrateFileList *list, const char *dir_path) {
+    if (!list || !dir_path) return -1;
+
+    // Free existing files
+    if (list->filenames) {
+        for (int i = 0; i < list->count; i++) {
+            free(list->filenames[i]);
+        }
+    }
+    list->count = 0;
+    list->current_index = 0;
+
+    // Normalize and store directory path (remove trailing slash)
+    snprintf(list->directory, COMMON_MAX_PATH, "%s", dir_path);
+    normalize_directory_path(list->directory);
+
+#ifdef _WIN32
+    // Windows directory scanning using _findfirst/_findnext
+    char search_path[COMMON_MAX_PATH];
+    snprintf(search_path, sizeof(search_path), "%s/*.*", list->directory);
+
+    struct _finddata_t fileinfo;
+    intptr_t handle = _findfirst(search_path, &fileinfo);
+    if (handle == -1) return -1;
+
+    do {
+        // Skip directories
+        if (fileinfo.attrib & _A_SUBDIR) continue;
+
+        // Check if it's a valid samplecrate file
+        if (is_samplecrate_file(fileinfo.name) && list->count < COMMON_MAX_FILES) {
+            list->filenames[list->count++] = strdup(fileinfo.name);
+        }
+    } while (_findnext(handle, &fileinfo) == 0 && list->count < COMMON_MAX_FILES);
+
+    _findclose(handle);
+#else
+    // Unix directory scanning using opendir/readdir
+    DIR *dir = opendir(dir_path);
+    if (!dir) return -1;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && list->count < COMMON_MAX_FILES) {
+        // Check if it's a valid samplecrate file
+        if (!is_samplecrate_file(entry->d_name)) {
+            continue;
+        }
+
+        // Use d_type if available, fallback to stat
+        if (entry->d_type == DT_REG) {
+            list->filenames[list->count++] = strdup(entry->d_name);
+        } else if (entry->d_type == DT_UNKNOWN) {
+            char fullpath[COMMON_MAX_PATH];
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", list->directory, entry->d_name);
+            struct stat st;
+            if (stat(fullpath, &st) == 0 && S_ISREG(st.st_mode)) {
+                list->filenames[list->count++] = strdup(entry->d_name);
+            }
+        }
+    }
+
+    closedir(dir);
+#endif
+
+    return list->count;
+}
+
+const char* samplecrate_filelist_get_current_path(SamplecrateFileList *list, char *buffer, size_t bufsize) {
+    if (!list || !buffer || list->count == 0) return NULL;
+
+#ifdef _WIN32
+    snprintf(buffer, bufsize, "%s\\%s",
+             list->directory,
+             list->filenames[list->current_index]);
+#else
+    snprintf(buffer, bufsize, "%s/%s",
+             list->directory,
+             list->filenames[list->current_index]);
+#endif
+    return buffer;
+}
+
+void samplecrate_filelist_next(SamplecrateFileList *list) {
+    if (!list || list->count == 0) return;
+
+    list->current_index++;
+    if (list->current_index >= list->count) {
+        list->current_index = 0;
+    }
+}
+
+void samplecrate_filelist_prev(SamplecrateFileList *list) {
+    if (!list || list->count == 0) return;
+
+    list->current_index--;
+    if (list->current_index < 0) {
+        list->current_index = list->count - 1;
+    }
+}
+
+void samplecrate_filelist_destroy(SamplecrateFileList *list) {
+    if (!list) return;
+
+    if (list->filenames) {
+        for (int i = 0; i < list->count; i++) {
+            free(list->filenames[i]);
+        }
+        free(list->filenames);
+    }
+
+    free(list);
+}
 
 void samplecrate_mixer_init(SamplecrateMixer* mixer) {
     if (!mixer) return;

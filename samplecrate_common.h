@@ -1,9 +1,39 @@
 #ifndef SAMPLECRATE_COMMON_H
 #define SAMPLECRATE_COMMON_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Maximum path length
+#define COMMON_MAX_PATH 1024
+#define COMMON_MAX_FILES 4096
+
+// File list management
+typedef struct {
+    char **filenames;     // Array of filenames (not full paths)
+    int count;
+    int current_index;
+    char directory[COMMON_MAX_PATH];  // Directory path (normalized, no trailing slash)
+} SamplecrateFileList;
+
+// Initialize file list
+SamplecrateFileList* samplecrate_filelist_create(void);
+
+// Load files from directory (handles trailing slash automatically)
+int samplecrate_filelist_load(SamplecrateFileList *list, const char *dir_path);
+
+// Get current file's full path
+const char* samplecrate_filelist_get_current_path(SamplecrateFileList *list, char *buffer, size_t bufsize);
+
+// Navigate file list
+void samplecrate_filelist_next(SamplecrateFileList *list);
+void samplecrate_filelist_prev(SamplecrateFileList *list);
+
+// Free file list
+void samplecrate_filelist_destroy(SamplecrateFileList *list);
 
 // Mixer state
 typedef struct {

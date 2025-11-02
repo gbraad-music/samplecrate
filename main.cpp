@@ -81,6 +81,10 @@ int num_audio_devices = 0;  // Number of available audio output devices
 SamplecrateRSX* rsx = nullptr;
 std::string rsx_file_path = "";
 
+// File browser for .rsx and .sfz files
+SamplecrateFileList* file_list = nullptr;
+bool file_browser_mode = false;  // Set to true when browsing (shows filename in LCD)
+
 // MIDI file pad player
 MidiFilePadPlayer* midi_pad_player = nullptr;
 
@@ -1576,8 +1580,28 @@ int main(int argc, char* argv[]) {
         const char* input_file = argv[1];
         size_t len = strlen(input_file);
 
+        // Check if input is a directory
+        struct stat path_stat;
+        bool is_directory = false;
+        if (stat(input_file, &path_stat) == 0 && S_ISDIR(path_stat.st_mode)) {
+            is_directory = true;
+        }
+
+        if (is_directory) {
+            // Directory-only mode: Initialize file browser without loading anything
+            std::cout << "Directory mode: " << input_file << std::endl;
+            file_list = samplecrate_filelist_create();
+            if (file_list) {
+                int file_count = samplecrate_filelist_load(file_list, input_file);
+                std::cout << "File browser: Loaded " << file_count << " files from " << input_file << std::endl;
+                if (file_count > 0) {
+                    std::cout << "Use < and > buttons to browse, 'o' to load" << std::endl;
+                }
+            }
+            // Don't load any SFZ/RSX file - user will select via file browser
+        }
         // Check if file ends with .rsx
-        if (len > 4 && strcmp(input_file + len - 4, ".rsx") == 0) {
+        else if (len > 4 && strcmp(input_file + len - 4, ".rsx") == 0) {
             is_rsx = true;
 
             // Load RSX file
@@ -1585,6 +1609,32 @@ int main(int argc, char* argv[]) {
             if (samplecrate_rsx_load(rsx, input_file) == 0) {
                 rsx_file_path = input_file;  // Store RSX path for saving later
                 std::cout << "Loaded RSX file: " << input_file << std::endl;
+
+                // Initialize file browser with the directory of the loaded RSX file
+                std::string dir = input_file;
+                size_t last_slash = dir.find_last_of("/\\");
+                if (last_slash != std::string::npos) {
+                    dir = dir.substr(0, last_slash);
+                    file_list = samplecrate_filelist_create();
+                    if (file_list) {
+                        int file_count = samplecrate_filelist_load(file_list, dir.c_str());
+                        std::cout << "File browser: Loaded " << file_count << " files from " << dir << std::endl;
+
+                        // Find and set current file as current index
+                        const char* current_filename = strrchr(input_file, '/');
+                        if (!current_filename) current_filename = strrchr(input_file, '\\');
+                        if (current_filename) {
+                            current_filename++;  // Skip the slash
+                            for (int i = 0; i < file_list->count; i++) {
+                                if (strcmp(file_list->filenames[i], current_filename) == 0) {
+                                    file_list->current_index = i;
+                                    std::cout << "  Current file: " << current_filename << " (index " << i << ")" << std::endl;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Use programs if defined, otherwise fall back to legacy sfz_file
                 const char* sfz_to_load = nullptr;
@@ -1608,9 +1658,9 @@ int main(int argc, char* argv[]) {
                 sfz_file = strdup(sfz_path);  // Make a copy
 
                 // Extract filename for display
-                const char* last_slash = strrchr(sfz_to_load, '/');
-                if (last_slash) {
-                    sfz_filename = last_slash + 1;
+                const char* last_slash_ptr = strrchr(sfz_to_load, '/');
+                if (last_slash_ptr) {
+                    sfz_filename = last_slash_ptr + 1;
                 } else {
                     sfz_filename = sfz_to_load;
                 }
@@ -2177,13 +2227,28 @@ int main(int argc, char* argv[]) {
             {
             // Update LCD display with current state
             if (lcd_display) {
-                char lcd_text[256];
+                char lcd_text[256] = "";
 
                 // Show error if present
                 if (!error_message.empty()) {
                     snprintf(lcd_text, sizeof(lcd_text),
                              "ERROR:\n%s",
                              error_message.c_str());
+                    lcd_write(lcd_display, lcd_text);
+                }
+                // Show file browser when in browse mode (takes priority)
+                else if (file_browser_mode && file_list && file_list->count > 0) {
+                    // Display current filename in browser (like Regroove)
+                    char line1[64];
+                    snprintf(line1, sizeof(line1), "File: %d/%d",
+                             file_list->current_index + 1, file_list->count);
+
+                    char line2[64];
+                    snprintf(line2, sizeof(line2), "%s",
+                             file_list->filenames[file_list->current_index]);
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s\n\nPress 'o' to LOAD", line1, line2);
+                    lcd_write(lcd_display, lcd_text);
                 }
                 // Show program information if RSX loaded
                 else if (rsx && rsx->num_programs > 0) {
@@ -2250,8 +2315,24 @@ int main(int argc, char* argv[]) {
                     }
 
                     snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
-                } else {
-                    // No programs, show simple display
+                    lcd_write(lcd_display, lcd_text);
+                }
+                // Show file browser when file_list exists (no RSX loaded yet)
+                else if (file_list && file_list->count > 0) {
+                    // Display current filename in browser (like Regroove)
+                    char line1[64];
+                    snprintf(line1, sizeof(line1), "File: %d/%d",
+                             file_list->current_index + 1, file_list->count);
+
+                    char line2[64];
+                    snprintf(line2, sizeof(line2), "%s",
+                             file_list->filenames[file_list->current_index]);
+
+                    snprintf(lcd_text, sizeof(lcd_text), "%s\n%s\n\nPress 'o' to LOAD", line1, line2);
+                    lcd_write(lcd_display, lcd_text);
+                }
+                // No RSX and no file list - show simple display
+                else {
                     // Build sync status and BPM display
                     char status_info[64] = "";
                     bool has_clock_sync = (midi_clock.active && midi_clock.bpm > 0.0f && config.midi_clock_tempo_sync == 1);
@@ -2297,8 +2378,8 @@ int main(int argc, char* argv[]) {
                     }
 
                     snprintf(lcd_text, sizeof(lcd_text), "%s\n%s", line1, line2);
+                    lcd_write(lcd_display, lcd_text);
                 }
-                lcd_write(lcd_display, lcd_text);
 
                 // Draw LCD
                 DrawLCD(lcd_get_buffer(lcd_display), LEFT_PANEL_WIDTH - 16.0f, LCD_HEIGHT);
@@ -2306,10 +2387,77 @@ int main(int argc, char* argv[]) {
 
             ImGui::Dummy(ImVec2(0, 8.0f));
 
-            // Program selection buttons (if RSX with programs loaded) - at top under LCD
+            // File browser buttons (like Regroove) - always shown if file_list exists
+            const float BUTTON_SIZE = 48.0f;
+            if (file_list && file_list->count > 0) {
+                ImGui::BeginGroup();
+                if (ImGui::Button("<", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                    if (learn_mode_active) {
+                        start_learn_for_action(ACTION_FILE_PREV);
+                    } else {
+                        samplecrate_filelist_prev(file_list);
+                        file_browser_mode = true;  // Enter browse mode
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("o", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                    if (learn_mode_active) {
+                        start_learn_for_action(ACTION_FILE_LOAD);
+                    } else {
+                        char path[COMMON_MAX_PATH * 2];
+                        samplecrate_filelist_get_current_path(file_list, path, sizeof(path));
+                        printf("[File Browser] Loading: %s\n", path);
+
+                        // Check if it's an RSX file
+                        size_t len = strlen(path);
+                        if (len > 4 && (strcmp(path + len - 4, ".rsx") == 0 || strcmp(path + len - 4, ".RSX") == 0)) {
+                            // Create RSX structure if not exists
+                            if (!rsx) {
+                                rsx = samplecrate_rsx_create();
+                            }
+
+                            // Load the RSX file
+                            if (rsx && samplecrate_rsx_load(rsx, path) == 0) {
+                                printf("[File Browser] Successfully loaded: %s\n", path);
+                                rsx_file_path = path;  // Update current file path
+
+                                // Reload all programs
+                                for (int i = 0; i < rsx->num_programs; i++) {
+                                    reload_program(i);
+                                }
+                                load_note_suppression_from_rsx();
+                                current_program = 0;
+
+                                // Exit browse mode after successful load
+                                file_browser_mode = false;
+
+                                printf("[File Browser] Loaded program 1 from %s\n", file_list->filenames[file_list->current_index]);
+                            } else {
+                                printf("[File Browser] Failed to load: %s\n", path);
+                            }
+                        } else if (len > 4 && (strcmp(path + len - 4, ".sfz") == 0 || strcmp(path + len - 4, ".SFZ") == 0)) {
+                            // Direct SFZ file loading (legacy mode)
+                            printf("[File Browser] Direct SFZ loading not yet implemented\n");
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(">", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                    if (learn_mode_active) {
+                        start_learn_for_action(ACTION_FILE_NEXT);
+                    } else {
+                        samplecrate_filelist_next(file_list);
+                        file_browser_mode = true;  // Enter browse mode
+                    }
+                }
+                ImGui::EndGroup();
+            }
+
+            ImGui::Dummy(ImVec2(0, 8.0f));
+
+            // Program selection buttons (if RSX with programs loaded AND file already loaded)
             if (rsx && rsx->num_programs > 1) {
                 const float PROG_BUTTON_SIZE = 48.0f;
-                ImGui::Text("PROGRAM:");
                 ImGui::Spacing();
 
                 // P- button (disabled if at first program)
@@ -2364,7 +2512,6 @@ int main(int argc, char* argv[]) {
             }
 
             // Mode selection buttons
-            const float BUTTON_SIZE = 48.0f;
 
             // Switch to master effects settings
             ImVec4 fxmCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_MASTER) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
