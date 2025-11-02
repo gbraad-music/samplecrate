@@ -2320,7 +2320,7 @@ int main(int argc, char* argv[]) {
         }
 
         // RIGHT PANEL - Switch based on mode
-        // In fullscreen pads mode, use full width
+        // In fullscreen pads mode, hide channel panel and use full screen for pads
         float rightX = fullscreen_pads_mode ? 0.0f : (SIDE_MARGIN + LEFT_PANEL_WIDTH + SIDE_MARGIN);
         float rightW = fullscreen_pads_mode ? fullW : (fullW - rightX - SIDE_MARGIN);
 
@@ -2336,12 +2336,18 @@ int main(int argc, char* argv[]) {
         float sliderW = BASE_SLIDER_W * widthScale;
         float spacing = BASE_SPACING * widthScale;
 
-        // Use channelAreaHeight for right panel (same as mock-ui.cpp)
+        // In fullscreen pads mode, use entire window height for pads (account for sequencer at bottom)
+        float actualChannelAreaHeight = fullscreen_pads_mode ?
+            (fullH - TOP_MARGIN - GAP_ABOVE_SEQUENCER - SEQUENCER_HEIGHT - BOTTOM_MARGIN - childPaddingY - childBorderY) :
+            channelAreaHeight;
+
+        // Use actualChannelAreaHeight for right panel
         ImGui::SetCursorPos(ImVec2(rightX, TOP_MARGIN));
-        ImGui::BeginChild("right_panel", ImVec2(rightW, channelAreaHeight), false, ImGuiWindowFlags_NoScrollbar);
+        bool show_border = !fullscreen_pads_mode;  // Remove border in fullscreen mode so bar is flush against edge
+        ImGui::BeginChild("right_panel", ImVec2(rightW, actualChannelAreaHeight), show_border, ImGuiWindowFlags_NoScrollbar);
         {
             float labelH = ImGui::GetTextLineHeight();
-            float contentHeight = channelAreaHeight - childPaddingY;
+            float contentHeight = actualChannelAreaHeight - childPaddingY;
             float panSliderH = 20.0f;  // Height for horizontal pan slider
             const float SOLO_SIZE = 34.0f;
             const float MUTE_SIZE = 34.0f;
@@ -3804,14 +3810,22 @@ int main(int argc, char* argv[]) {
                 float padW = (availWidth - padSpacing * (PADS_PER_ROW - 1)) / PADS_PER_ROW;
                 float padH = (availHeight - padSpacing * (NUM_ROWS - 1)) / NUM_ROWS;
                 float padSize = fminf(padW, padH);
-                if (padSize > 140.0f) padSize = 140.0f; // Max pad size
-                if (padSize < 60.0f) padSize = 60.0f;   // Min pad size
+
+                // In fullscreen mode, allow pads to fill available space
+                if (!fullscreen_pads_mode) {
+                    if (padSize > 140.0f) padSize = 140.0f; // Max pad size
+                    if (padSize < 60.0f) padSize = 60.0f;   // Min pad size
+                } else {
+                    // In fullscreen mode, only enforce a minimum for usability
+                    if (padSize < 40.0f) padSize = 40.0f;   // Min pad size for usability
+                }
 
                 // Center the grid
                 float gridW = PADS_PER_ROW * padSize + (PADS_PER_ROW - 1) * padSpacing;
                 float gridH = NUM_ROWS * padSize + (NUM_ROWS - 1) * padSpacing;
-                float startX = origin.x + (rightW - gridW) * 0.5f;
-                float startY = origin.y + (contentHeight - gridH) * 0.5f;
+                // Use relative positioning within the child window, not screen coordinates
+                float startX = (rightW - gridW) * 0.5f;
+                float startY = (contentHeight - gridH) * 0.5f;
 
                 // Draw trigger pads
                 for (int row = 0; row < NUM_ROWS; row++) {
@@ -3819,6 +3833,7 @@ int main(int argc, char* argv[]) {
                         int idx = row * PADS_PER_ROW + col;
                         if (idx >= total_pads) break;
 
+                        // Calculate position relative to child window (not screen space)
                         float posX = startX + col * (padSize + padSpacing);
                         float posY = startY + row * (padSize + padSpacing);
 
