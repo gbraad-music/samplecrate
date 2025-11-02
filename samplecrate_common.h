@@ -43,6 +43,9 @@ typedef struct {
     int midi_clock_tempo_sync;  // 0 = disabled (visual only), 1 = enabled (adjust playback tempo)
     int midi_spp_receive;       // 0 = disabled (ignore SPP), 1 = enabled (sync to SPP)
 
+    // SysEx settings
+    int sysex_device_id;        // SysEx device ID (0-127) for remote control
+
     // Mixer defaults
     float default_master_volume;
     float default_master_pan;

@@ -1997,8 +1997,8 @@ int main(int argc, char* argv[]) {
         midi_device_ports[1] = config.midi_device_1;
         midi_device_ports[2] = config.midi_device_2;
 
-        // Initialize SysEx system with device ID 0 (can be changed in UI)
-        sysex_init(0);
+        // Initialize SysEx system with configured device ID
+        sysex_init(config.sysex_device_id);
         sysex_register_callback(sysex_callback, nullptr);
         std::cout << "SysEx initialized (device ID: " << (int)sysex_get_device_id() << ")" << std::endl;
 
@@ -4613,6 +4613,25 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "When enabled, sync playback position to external MIDI clock");
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // SysEx Device ID
+                ImGui::Text("SysEx Device ID (Remote Control):");
+                ImGui::PushItemWidth(100.0f);
+                int sysex_id = config.sysex_device_id;
+                if (ImGui::SliderInt("##sysex_device_id", &sysex_id, 0, 127)) {
+                    config.sysex_device_id = sysex_id;
+                    sysex_set_device_id((uint8_t)sysex_id);
+                    samplecrate_config_save(&config, "samplecrate.ini");
+                }
+                ImGui::PopItemWidth();
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Device ID for receiving SysEx remote control commands (0-127)");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Use different IDs for multiple instances. ID 127 = broadcast to all.");
 
                 ImGui::Spacing();
 
