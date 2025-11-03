@@ -182,3 +182,10 @@ int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index
 
     return medness_sequencer_slot_is_active(pad_player->sequencer, pad_index);
 }
+
+MednessTrack* midi_file_pad_player_get_track(MidiFilePadPlayer* pad_player, int pad_index) {
+    if (!pad_player || pad_index < 0 || pad_index >= MAX_PAD_PLAYERS) {
+        return nullptr;
+    }
+    return pad_player->tracks[pad_index];
+}

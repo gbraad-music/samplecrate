@@ -62,6 +62,10 @@ void midi_file_pad_player_update_all_samples(MidiFilePadPlayer* pad_player, int 
 // Check if a specific pad is playing
 int midi_file_pad_player_is_playing(MidiFilePadPlayer* pad_player, int pad_index);
 
+// Get the track for a specific pad (for display/visualization)
+// Returns NULL if pad_index is invalid or no track loaded
+MednessTrack* midi_file_pad_player_get_track(MidiFilePadPlayer* pad_player, int pad_index);
+
 #ifdef __cplusplus
 }
 #endif

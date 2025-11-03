@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <map>
 #include <iostream>
 #include <cstring>
 #include <mutex>
@@ -185,8 +186,9 @@ enum UIMode {
     UI_MODE_MIX = 1,
     UI_MODE_EFFECTS = 2,
     UI_MODE_PADS = 3,
-    UI_MODE_MIDI = 4,
-    UI_MODE_SETTINGS = 5
+    UI_MODE_TRACK = 4,
+    UI_MODE_MIDI = 5,
+    UI_MODE_SETTINGS = 6
 };
 UIMode ui_mode = UI_MODE_PADS;  // Default to PADS view
 
@@ -465,6 +467,20 @@ void autosave_effects_to_rsx() {
 
     // Write to file
     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+}
+
+// Convert MIDI note number to tracker format (e.g., 36 -> "C-1")
+static void midi_note_to_string(int note, char* buf, size_t bufsize) {
+    if (note < 0 || note > 127) {
+        snprintf(buf, bufsize, "...");
+        return;
+    }
+
+    const char* note_names[] = {"C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"};
+    int octave = (note / 12) - 1;  // MIDI note 0 = C-(-1), 12 = C-0, 24 = C-1, etc.
+    int semitone = note % 12;
+
+    snprintf(buf, bufsize, "%s%d", note_names[semitone], octave);
 }
 
 // DrawLCD function from mock-ui.cpp
@@ -2574,6 +2590,15 @@ int main(int argc, char* argv[]) {
                 ui_mode = UI_MODE_PADS;
             }
             ImGui::PopStyleColor();
+            ImGui::SameLine();
+
+            // Track view button
+            ImVec4 trackCol = (ui_mode == UI_MODE_TRACK) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, trackCol);
+            if (ImGui::Button("TRACK", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                ui_mode = UI_MODE_TRACK;
+            }
+            ImGui::PopStyleColor();
 
             ImGui::Dummy(ImVec2(0, 16.0f));
 
@@ -4450,6 +4475,192 @@ int main(int argc, char* argv[]) {
 
                 // Restore cursor position so bar doesn't affect content size
                 ImGui::SetCursorPos(cursorBeforeBar);
+            }
+            else if (ui_mode == UI_MODE_TRACK) {
+                // TRACK MODE: Display MIDI track data for currently playing pads (side-by-side like ModPlug Tracker)
+                ImGui::Text("TRACK VIEW - MIDI Note Data");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (!midi_pad_player || !rsx) {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No pads loaded");
+                } else {
+                    // Get current row from sequencer
+                    int current_row = sequencer ? medness_sequencer_get_row(sequencer) : 0;
+
+                    // Collect all playing pads with their track data
+                    struct PlayingPad {
+                        int pad_idx;
+                        MednessTrack* track;
+                        const MednessTrackEvent* events;
+                        int event_count;
+                        int tpqn;
+                        int program_num;
+                    };
+
+                    std::vector<PlayingPad> playing_pads;
+                    for (int pad_idx = 0; pad_idx < rsx->num_pads && pad_idx < RSX_MAX_NOTE_PADS; pad_idx++) {
+                        if (!midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) continue;
+
+                        MednessTrack* track = midi_file_pad_player_get_track(midi_pad_player, pad_idx);
+                        if (!track) continue;
+
+                        int event_count = 0;
+                        const MednessTrackEvent* events = medness_track_get_events(track, &event_count);
+                        int tpqn = medness_track_get_tpqn(track);
+
+                        if (event_count == 0) continue;
+
+                        PlayingPad pp;
+                        pp.pad_idx = pad_idx;
+                        pp.track = track;
+                        pp.events = events;
+                        pp.event_count = event_count;
+                        pp.tpqn = tpqn;
+                        // Get actual program number from pad (0-3 maps to display as 01-04)
+                        pp.program_num = rsx->pads[pad_idx].program + 1;
+                        playing_pads.push_back(pp);
+                    }
+
+                    if (playing_pads.empty()) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No pads playing - trigger a pad to view track data");
+                    } else {
+                        // Display pads side-by-side as columns
+                        ImGui::BeginChild("##track_scroll", ImVec2(rightW - 32.0f, contentHeight - 64.0f), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+
+                        // Set up columns: Row + one column per playing pad
+                        int num_cols = 1 + playing_pads.size();  // Row number + pads
+                        ImGui::Columns(num_cols, "track_columns", true);
+
+                        // Column widths
+                        ImGui::SetColumnWidth(0, 50.0f);  // Row column
+                        for (size_t i = 0; i < playing_pads.size(); i++) {
+                            ImGui::SetColumnWidth(i + 1, 140.0f);  // Each pad column
+                        }
+
+                        // Header row
+                        ImGui::Text("Row"); ImGui::NextColumn();
+                        for (const auto& pp : playing_pads) {
+                            ImGui::Text("%s", rsx->pads[pp.pad_idx].description);
+                            ImGui::NextColumn();
+                        }
+                        ImGui::Separator();
+
+                        // Build event maps for each pad (tick -> list of events)
+                        // Pattern is 64 rows = 384 pulses
+                        // Sequencer: tick = (pulse * TPQN) / 24
+                        // Therefore: row = (tick * 24) / (TPQN * 6) = (tick * 4) / TPQN
+                        std::vector<std::map<int, std::vector<int>>> event_maps;
+                        for (const auto& pp : playing_pads) {
+                            std::map<int, std::vector<int>> emap;
+                            for (int i = 0; i < pp.event_count; i++) {
+                                // Convert MIDI tick to pattern row (0-63)
+                                int row = (pp.events[i].tick * 4) / pp.tpqn;
+                                if (row >= 0 && row < 64) {
+                                    emap[row].push_back(i);
+                                }
+                            }
+                            event_maps.push_back(emap);
+                        }
+
+                        // Display 64 rows
+                        const int num_rows = 64;
+                        for (int row = 0; row < num_rows; row++) {
+                            bool is_current = (row == current_row);
+
+                            // Get full row dimensions for background highlight
+                            ImVec2 row_start_pos = ImGui::GetCursorScreenPos();
+                            float row_height = ImGui::GetTextLineHeightWithSpacing();
+
+                            // Draw background highlight for current row
+                            if (is_current) {
+                                float total_width = 0.0f;
+                                for (int c = 0; c < num_cols; c++) {
+                                    total_width += ImGui::GetColumnWidth(c);
+                                }
+                                ImGui::GetWindowDrawList()->AddRectFilled(
+                                    row_start_pos,
+                                    ImVec2(row_start_pos.x + total_width, row_start_pos.y + row_height),
+                                    IM_COL32(60, 60, 40, 255)
+                                );
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+                            }
+
+                            // Row number column
+                            ImGui::Text("%02d", row);
+                            ImGui::NextColumn();
+
+                            // Display each pad's data for this row
+                            for (size_t pad_col = 0; pad_col < playing_pads.size(); pad_col++) {
+                                const auto& pp = playing_pads[pad_col];
+                                const auto& emap = event_maps[pad_col];
+
+                                auto it = emap.find(row);
+                                if (it != emap.end() && !it->second.empty()) {
+                                    // Found event(s) at this row
+                                    // Prioritize note-ON events, only show note-OFF if no note-ON exists
+                                    const MednessTrackEvent* evt = nullptr;
+
+                                    // First, look for a note-ON event in this row
+                                    for (int idx : it->second) {
+                                        if (pp.events[idx].on) {
+                                            evt = &pp.events[idx];
+                                            break;
+                                        }
+                                    }
+
+                                    // If no note-ON found, check for note-OFF (for sustained notes)
+                                    if (!evt && !it->second.empty()) {
+                                        evt = &pp.events[it->second[0]];
+                                    }
+
+                                    if (evt) {
+                                        char note_str[8];
+                                        midi_note_to_string(evt->note, note_str, sizeof(note_str));
+
+                                        if (evt->on) {
+                                            // Note ON format: "NOTE PROG VOL EFFECT"
+                                            // Volume is only shown if velocity < 0x7F (100%)
+                                            if (evt->velocity < 0x7F) {
+                                                ImGui::Text("%s %02d %02X ...", note_str, pp.program_num, evt->velocity);
+                                            } else {
+                                                ImGui::Text("%s %02d .. ...", note_str, pp.program_num);
+                                            }
+                                        } else {
+                                            // Note OFF: "NOTE PROG .. FFF"
+                                            // Only shown if at different row than note-ON (sustained sounds)
+                                            ImGui::Text("%s %02d .. FFF", note_str, pp.program_num);
+                                        }
+                                    } else {
+                                        // Empty row: "... .. .. ..."
+                                        ImGui::Text("... .. .. ...");
+                                    }
+                                } else {
+                                    // Empty row: "... .. .. ..."
+                                    ImGui::Text("... .. .. ...");
+                                }
+                                ImGui::NextColumn();
+                            }
+
+                            if (is_current) {
+                                ImGui::PopStyleColor();
+                            }
+                        }
+
+                        ImGui::Columns(1);
+
+                        // Auto-scroll to keep current row centered
+                        float header_height = ImGui::GetTextLineHeightWithSpacing() * 2;  // Header + separator
+                        float current_row_y = header_height + (current_row * ImGui::GetTextLineHeightWithSpacing());
+                        float window_height = ImGui::GetWindowHeight();
+                        float target_scroll = current_row_y - (window_height * 0.5f);
+                        target_scroll = fmaxf(0.0f, target_scroll);
+
+                        ImGui::SetScrollY(target_scroll);
+
+                        ImGui::EndChild();
+                    }
+                }
             }
             else if (ui_mode == UI_MODE_MIDI) {
                 // MIDI MODE: MIDI device configuration
