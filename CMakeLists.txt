@@ -55,6 +55,7 @@ add_executable(samplecrate
     lcd.c
     samplecrate_common.c
     samplecrate_rsx.c
+    samplecrate_engine.cpp
     regroove_effects.c
     midi.c
     input_mappings.c
