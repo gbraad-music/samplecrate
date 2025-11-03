@@ -2428,6 +2428,23 @@ int main(int argc, char* argv[]) {
                                 load_note_suppression_from_rsx();
                                 current_program = 0;
 
+                                // Load MIDI files for all configured pads
+                                if (midi_pad_player) {
+                                    printf("[File Browser] Loading MIDI files for pads...\n");
+                                    for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+                                        if (rsx->pads[i].midi_file[0] != '\0') {
+                                            char midi_path[512];
+                                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
+
+                                            if (midi_file_pad_player_load(midi_pad_player, i, midi_path, &midi_pad_indices[i]) == 0) {
+                                                printf("  Pad %d: Loaded MIDI file %s\n", i + 1, midi_path);
+                                            } else {
+                                                printf("  Pad %d: Failed to load MIDI file %s\n", i + 1, midi_path);
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Exit browse mode after successful load
                                 file_browser_mode = false;
 
