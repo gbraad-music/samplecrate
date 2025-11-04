@@ -1177,19 +1177,17 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     //           << " data1=" << std::dec << (int)data1 << " data2=" << (int)data2
     //           << " channel=" << (channel + 1) << std::endl;
 
-    // Channel filtering (for channel voice messages, not system messages)
+    // Global MIDI input channel filtering (for channel voice messages, not system messages)
     // System messages (0xF0-0xFF) don't have channels, so we don't filter them
     if (msg_type != 0xF0) {  // Not a system message
-        if (device_id >= 0 && device_id < 2) {
-            int channel_filter = config.midi_channel[device_id];
-            // If channel filter is set (not -1/Omni), check if message channel matches
-            if (channel_filter >= 0 && channel_filter <= 15) {
-                if (channel != channel_filter) {
-                    // Message is on a different channel, ignore it
-                    std::cout << "  Filtered out (channel " << (channel + 1)
-                              << " != filter channel " << (channel_filter + 1) << ")" << std::endl;
-                    return;
-                }
+        // Apply global channel filter: 0 = Omni (all), 1-16 = specific channel
+        if (config.midi_input_channel > 0) {
+            int filter_channel = config.midi_input_channel - 1;  // Convert 1-16 to 0-15
+            if (channel != filter_channel) {
+                // Message is on a different channel, ignore it
+                std::cout << "  Filtered out (channel " << (channel + 1)
+                          << " != filter channel " << config.midi_input_channel << ")" << std::endl;
+                return;
             }
         }
     }
@@ -1222,19 +1220,6 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     if (msg_type == 0x90 && data2 > 0) {  // Note on
         // Determine which program to target based on device-specific settings
         int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
-
-        // Check per-program MIDI channel filter
-        if (rsx && target_prog >= 0 && target_prog < rsx->num_programs) {
-            int prog_channel_filter = rsx->program_midi_channels[target_prog];
-            if (prog_channel_filter >= 0 && prog_channel_filter <= 15) {
-                if (channel != prog_channel_filter) {
-                    std::cout << "  Program " << (target_prog + 1) << " channel filter: Note on channel "
-                              << (channel + 1) << " != program channel " << (prog_channel_filter + 1)
-                              << " (ignored)" << std::endl;
-                    return;  // Channel doesn't match program filter
-                }
-            }
-        }
 
         // Check if note is suppressed (global or for target program)
         bool is_suppressed = note_suppressed[data1][0] ||  // Global suppression
@@ -1270,17 +1255,6 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
     } else if (msg_type == 0x80 || (msg_type == 0x90 && data2 == 0)) {  // Note off
         // Determine which program to target (same logic as note on)
         int target_prog = config.midi_program_change_enabled[device_id] ? midi_target_program[device_id] : current_program;
-
-        // Check per-program MIDI channel filter
-        if (rsx && target_prog >= 0 && target_prog < rsx->num_programs) {
-            int prog_channel_filter = rsx->program_midi_channels[target_prog];
-            if (prog_channel_filter >= 0 && prog_channel_filter <= 15) {
-                if (channel != prog_channel_filter) {
-                    // Silently ignore - don't log note offs as much
-                    return;  // Channel doesn't match program filter
-                }
-            }
-        }
 
         // Log to MIDI monitor
         add_to_midi_monitor(device_id, "Note Off", data1, data2, target_prog + 1);
@@ -2899,45 +2873,6 @@ int main(int argc, char* argv[]) {
                         }
                         ImGui::PopItemWidth();
 
-                        // MIDI Channel filter with label
-                        ImGui::Text("MIDI Ch:");
-                        ImGui::SameLine(80);
-                        char midi_ch_label[32];
-                        snprintf(midi_ch_label, sizeof(midi_ch_label), "##prog%d_midich", i);
-                        ImGui::PushItemWidth(150);
-
-                        // Build preview label
-                        char midi_ch_preview[32];
-                        if (rsx->program_midi_channels[i] == -1) {
-                            snprintf(midi_ch_preview, sizeof(midi_ch_preview), "Omni (All)");
-                        } else {
-                            snprintf(midi_ch_preview, sizeof(midi_ch_preview), "Channel %d", rsx->program_midi_channels[i] + 1);
-                        }
-
-                        if (ImGui::BeginCombo(midi_ch_label, midi_ch_preview)) {
-                            // Omni option
-                            if (ImGui::Selectable("Omni (All Channels)", rsx->program_midi_channels[i] == -1)) {
-                                rsx->program_midi_channels[i] = -1;
-                                if (!rsx_file_path.empty()) {
-                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
-                                }
-                            }
-
-                            // Channel 1-16
-                            for (int ch = 0; ch < 16; ch++) {
-                                char ch_label[16];
-                                snprintf(ch_label, sizeof(ch_label), "Channel %d", ch + 1);
-                                if (ImGui::Selectable(ch_label, rsx->program_midi_channels[i] == ch)) {
-                                    rsx->program_midi_channels[i] = ch;
-                                    if (!rsx_file_path.empty()) {
-                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
-                                    }
-                                }
-                            }
-                            ImGui::EndCombo();
-                        }
-                        ImGui::PopItemWidth();
-
                         // Remove button
                         if (ImGui::Button("Remove Program")) {
                             // Shift programs down
@@ -2946,14 +2881,12 @@ int main(int argc, char* argv[]) {
                                 strcpy(rsx->program_names[j], rsx->program_names[j + 1]);
                                 rsx->program_volumes[j] = rsx->program_volumes[j + 1];
                                 rsx->program_pans[j] = rsx->program_pans[j + 1];
-                                rsx->program_midi_channels[j] = rsx->program_midi_channels[j + 1];
                             }
                             // Clear last program
                             rsx->program_files[rsx->num_programs - 1][0] = '\0';
                             rsx->program_names[rsx->num_programs - 1][0] = '\0';
                             rsx->program_volumes[rsx->num_programs - 1] = 1.0f;
                             rsx->program_pans[rsx->num_programs - 1] = 0.5f;
-                            rsx->program_midi_channels[rsx->num_programs - 1] = -1;
                             rsx->num_programs--;
 
                             // Autosave
@@ -2975,7 +2908,6 @@ int main(int argc, char* argv[]) {
                             rsx->program_names[rsx->num_programs][0] = '\0';
                             rsx->program_volumes[rsx->num_programs] = 1.0f;  // Default volume (100%)
                             rsx->program_pans[rsx->num_programs] = 0.5f;     // Center pan
-                            rsx->program_midi_channels[rsx->num_programs] = -1;  // Omni by default
                             rsx->program_sample_counts[rsx->num_programs] = 0;   // No samples initially
                             rsx->num_programs++;
 
@@ -2992,7 +2924,6 @@ int main(int argc, char* argv[]) {
                             rsx->program_names[rsx->num_programs][0] = '\0';
                             rsx->program_volumes[rsx->num_programs] = 1.0f;  // Default volume (100%)
                             rsx->program_pans[rsx->num_programs] = 0.5f;     // Center pan
-                            rsx->program_midi_channels[rsx->num_programs] = -1;  // Omni by default
                             rsx->program_sample_counts[rsx->num_programs] = 0;   // No samples initially
                             rsx->num_programs++;
 
@@ -4668,6 +4599,44 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
+                // Global MIDI Input Channel Filter
+                ImGui::Text("MIDI Input Channel:");
+                ImGui::SameLine();
+                ImGui::PushItemWidth(150.0f);
+
+                char channel_preview[32];
+                if (config.midi_input_channel == 0) {
+                    snprintf(channel_preview, sizeof(channel_preview), "Omni (All)");
+                } else {
+                    snprintf(channel_preview, sizeof(channel_preview), "Channel %d", config.midi_input_channel);
+                }
+
+                if (ImGui::BeginCombo("##global_midi_channel", channel_preview)) {
+                    if (ImGui::Selectable("Omni (All Channels)", config.midi_input_channel == 0)) {
+                        config.midi_input_channel = 0;
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                    }
+                    for (int ch = 1; ch <= 16; ch++) {
+                        char label[16];
+                        snprintf(label, sizeof(label), "Channel %d", ch);
+                        if (ImGui::Selectable(label, config.midi_input_channel == ch)) {
+                            config.midi_input_channel = ch;
+                            samplecrate_config_save(&config, "samplecrate.ini");
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(?)");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Filter incoming MIDI by channel.\nOmni: Receive from all channels\n1-16: Only receive from specified channel");
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 int num_ports = midi_list_ports();
                 ImGui::Text("Available MIDI Ports: %d", num_ports);
                 ImGui::Spacing();
@@ -4720,36 +4689,6 @@ int main(int argc, char* argv[]) {
                                     midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES);
                                 }
                             }
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::PopItemWidth();
-
-                // MIDI Channel selection for Device 1
-                ImGui::SameLine();
-                ImGui::Text("Ch:");
-                ImGui::SameLine();
-                ImGui::PushItemWidth(100.0f);
-
-                char channel_preview_0[32];
-                if (config.midi_channel[0] == -1) {
-                    snprintf(channel_preview_0, sizeof(channel_preview_0), "Omni");
-                } else {
-                    snprintf(channel_preview_0, sizeof(channel_preview_0), "%d", config.midi_channel[0] + 1);
-                }
-
-                if (ImGui::BeginCombo("##midi_channel_0", channel_preview_0)) {
-                    if (ImGui::Selectable("Omni (All)", config.midi_channel[0] == -1)) {
-                        config.midi_channel[0] = -1;
-                        samplecrate_config_save(&config, "samplecrate.ini");
-                    }
-                    for (int ch = 0; ch < 16; ch++) {
-                        char label[16];
-                        snprintf(label, sizeof(label), "%d", ch + 1);
-                        if (ImGui::Selectable(label, config.midi_channel[0] == ch)) {
-                            config.midi_channel[0] = ch;
-                            samplecrate_config_save(&config, "samplecrate.ini");
                         }
                     }
                     ImGui::EndCombo();
@@ -4837,36 +4776,6 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
-                // MIDI Channel selection for Device 2
-                ImGui::SameLine();
-                ImGui::Text("Ch:");
-                ImGui::SameLine();
-                ImGui::PushItemWidth(100.0f);
-
-                char channel_preview_1[32];
-                if (config.midi_channel[1] == -1) {
-                    snprintf(channel_preview_1, sizeof(channel_preview_1), "Omni");
-                } else {
-                    snprintf(channel_preview_1, sizeof(channel_preview_1), "%d", config.midi_channel[1] + 1);
-                }
-
-                if (ImGui::BeginCombo("##midi_channel_1", channel_preview_1)) {
-                    if (ImGui::Selectable("Omni (All)", config.midi_channel[1] == -1)) {
-                        config.midi_channel[1] = -1;
-                        samplecrate_config_save(&config, "samplecrate.ini");
-                    }
-                    for (int ch = 0; ch < 16; ch++) {
-                        char label[16];
-                        snprintf(label, sizeof(label), "%d", ch + 1);
-                        if (ImGui::Selectable(label, config.midi_channel[1] == ch)) {
-                            config.midi_channel[1] = ch;
-                            samplecrate_config_save(&config, "samplecrate.ini");
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::PopItemWidth();
-
                 // Program routing for Device 2
                 ImGui::SameLine();
                 ImGui::PushItemWidth(150.0f);
@@ -4942,36 +4851,6 @@ int main(int argc, char* argv[]) {
                                     midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES);
                                 }
                             }
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::PopItemWidth();
-
-                // MIDI Channel selection for Device 3
-                ImGui::SameLine();
-                ImGui::Text("Ch:");
-                ImGui::SameLine();
-                ImGui::PushItemWidth(100.0f);
-
-                char channel_preview_2[32];
-                if (config.midi_channel[2] == -1) {
-                    snprintf(channel_preview_2, sizeof(channel_preview_2), "Omni");
-                } else {
-                    snprintf(channel_preview_2, sizeof(channel_preview_2), "%d", config.midi_channel[2] + 1);
-                }
-
-                if (ImGui::BeginCombo("##midi_channel_2", channel_preview_2)) {
-                    if (ImGui::Selectable("Omni (All)", config.midi_channel[2] == -1)) {
-                        config.midi_channel[2] = -1;
-                        samplecrate_config_save(&config, "samplecrate.ini");
-                    }
-                    for (int ch = 0; ch < 16; ch++) {
-                        char label[16];
-                        snprintf(label, sizeof(label), "%d", ch + 1);
-                        if (ImGui::Selectable(label, config.midi_channel[2] == ch)) {
-                            config.midi_channel[2] = ch;
-                            samplecrate_config_save(&config, "samplecrate.ini");
                         }
                     }
                     ImGui::EndCombo();
