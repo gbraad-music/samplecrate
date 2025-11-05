@@ -65,6 +65,8 @@ add_executable(samplecrate
     medness_sequencer.cpp
     midi_file_player.cpp
     midi_file_pad_player.cpp
+    midi_sequence_player.cpp
+    midi_sequence_manager.cpp
     ${IMGUI_SOURCES}
     ${MIDIFILE_SOURCES}
 )

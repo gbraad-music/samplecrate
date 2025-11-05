@@ -35,6 +35,7 @@ extern "C" {
 #include "midi_file_player.h"
 #include "midi_file_pad_player.h"
 #include "midi_sysex.h"
+#include "midi_sequence_manager.h"
 }
 
 // -----------------------------------------------------------------------------
@@ -91,6 +92,9 @@ MidiFilePadPlayer* midi_pad_player = nullptr;
 
 // Pattern sequencer (single source of truth for pattern position)
 MednessSequencer* sequencer = nullptr;
+
+// MIDI sequence manager (for multi-phrase sequences)
+MidiSequenceManager* sequence_manager = nullptr;
 
 // Pad index storage for MIDI file callbacks (so each pad knows which program to use)
 int midi_pad_indices[RSX_MAX_NOTE_PADS];
@@ -187,8 +191,9 @@ enum UIMode {
     UI_MODE_EFFECTS = 2,
     UI_MODE_PADS = 3,
     UI_MODE_TRACK = 4,
-    UI_MODE_MIDI = 5,
-    UI_MODE_SETTINGS = 6
+    UI_MODE_SEQUENCES = 5,
+    UI_MODE_MIDI = 6,
+    UI_MODE_SETTINGS = 7
 };
 UIMode ui_mode = UI_MODE_PADS;  // Default to PADS view
 
@@ -341,6 +346,19 @@ void save_note_suppression_to_rsx() {
 
     // Save to file
     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+}
+
+// Helper: reload sequences from RSX file
+void reload_sequences() {
+    if (!sequence_manager || !rsx || rsx_file_path.empty()) return;
+
+    std::cout << "[Sequences] Loading sequences from RSX file..." << std::endl;
+    int num_sequences = midi_sequence_manager_load_from_rsx(sequence_manager, rsx_file_path.c_str(), rsx);
+    if (num_sequences > 0) {
+        std::cout << "[Sequences] Loaded " << num_sequences << " sequences" << std::endl;
+    } else {
+        std::cout << "[Sequences] No sequences found in RSX file" << std::endl;
+    }
 }
 
 // Helper: reload a single program synth instance
@@ -761,6 +779,7 @@ void handle_input_event(InputEvent* event) {
                         if (samplecrate_rsx_load(rsx, filename) == 0) {
                             rsx_file_path = filename;
                             printf("Loaded RSX: %s\n", filename);
+                            reload_sequences();  // Load sequences from RSX
                         } else {
                             fprintf(stderr, "Failed to load RSX: %s\n", filename);
                             samplecrate_rsx_destroy(rsx);
@@ -892,6 +911,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                             reload_program(i);
                         }
                         load_note_suppression_from_rsx();
+                        reload_sequences();  // Load sequences from RSX
                         current_program = 0;
                     } else {
                         printf("[SysEx] Failed to load: %s\n", filename);
@@ -1013,6 +1033,9 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            if (sequence_manager) {
+                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                            }
                             std::cout << "  -> active_bpm/tempo_bpm updated to " << active_bpm << std::endl;
                         }
                     }
@@ -1382,6 +1405,11 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
             }
         }
         midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_pulse);
+
+        // Update sequence manager (for multi-phrase sequences)
+        if (sequence_manager) {
+            midi_sequence_manager_update_samples(sequence_manager, frames, 44100, current_pulse);
+        }
     }
 
     std::lock_guard<std::mutex> lock(synth_mutex);
@@ -1599,6 +1627,7 @@ int main(int argc, char* argv[]) {
             if (samplecrate_rsx_load(rsx, input_file) == 0) {
                 rsx_file_path = input_file;  // Store RSX path for saving later
                 std::cout << "Loaded RSX file: " << input_file << std::endl;
+                // Note: reload_sequences() will be called after sequence_manager is created
 
                 // Initialize file browser with the directory of the loaded RSX file
                 std::string dir = input_file;
@@ -1830,7 +1859,20 @@ int main(int argc, char* argv[]) {
     if (midi_pad_player) {
         midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
         midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
+    }
+
+    // Initialize MIDI sequence manager (for multi-phrase sequences)
+    sequence_manager = midi_sequence_manager_create();
+    if (sequence_manager) {
+        midi_sequence_manager_set_midi_callback(sequence_manager, midi_file_event_callback, nullptr);
+        midi_sequence_manager_set_tempo(sequence_manager, 125.0f);  // Default BPM
+        midi_sequence_manager_set_start_mode(sequence_manager, SEQUENCE_START_QUANTIZED);  // Wait for row 0
         midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
+
+        // Load sequences if RSX file was already loaded
+        if (rsx && !rsx_file_path.empty()) {
+            reload_sequences();
+        }
     }
 
     // Initialize pad indices array for MIDI file callbacks
@@ -2416,6 +2458,7 @@ int main(int argc, char* argv[]) {
                                     reload_program(i);
                                 }
                                 load_note_suppression_from_rsx();
+                                reload_sequences();  // Load sequences from RSX
                                 current_program = 0;
 
                                 // Load MIDI files for all configured pads
@@ -2577,6 +2620,15 @@ int main(int argc, char* argv[]) {
             ImGui::Dummy(ImVec2(0, 16.0f));
 
             // Additional mode buttons (second row)
+            // Sequences view button
+            ImVec4 seqCol = (ui_mode == UI_MODE_SEQUENCES) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, seqCol);
+            if (ImGui::Button("SEQ", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                ui_mode = UI_MODE_SEQUENCES;
+            }
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
             // LEARN button
             ImVec4 learnCol = learn_mode_active ? ImVec4(0.90f, 0.15f, 0.18f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, learnCol);
@@ -3337,6 +3389,9 @@ int main(int argc, char* argv[]) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            if (sequence_manager) {
+                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                            }
                         } else if (is_external_clock) {
                             // Revert to MIDI clock BPM if user tries to drag during external sync
                             tempo_bpm = midi_clock.bpm;
@@ -3357,6 +3412,9 @@ int main(int argc, char* argv[]) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            if (sequence_manager) {
+                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                            }
                         }
                     }
 
@@ -4269,8 +4327,26 @@ int main(int argc, char* argv[]) {
                             // Button just pressed
                             int velocity = pad->velocity > 0 ? pad->velocity : 100;
 
+                            // Check if pad has sequence configured
+                            if (sequence_manager && pad->sequence_index >= 0) {
+                                // Sequence trigger
+                                int seq_idx = pad->sequence_index;
+                                int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+
+                                if (midi_sequence_manager_is_playing(sequence_manager, seq_idx)) {
+                                    // Already playing - stop it
+                                    std::cout << "=== STOPPING SEQUENCE " << (seq_idx + 1) << " from pad " << (pad_idx + 1) << " ===" << std::endl;
+                                    midi_sequence_manager_stop(sequence_manager, seq_idx);
+                                    note_pad_fade[pad_idx] = 0.0f;
+                                } else {
+                                    // Start sequence
+                                    std::cout << "=== TRIGGERING SEQUENCE " << (seq_idx + 1) << " from pad " << (pad_idx + 1) << " ===" << std::endl;
+                                    midi_sequence_manager_play(sequence_manager, seq_idx, current_pulse);
+                                    note_pad_fade[pad_idx] = 1.5f;  // Bright blink for sequence start
+                                }
+                            }
                             // Check if pad has MIDI file configured
-                            if (midi_pad_player && pad->midi_file[0] != '\0') {
+                            else if (midi_pad_player && pad->midi_file[0] != '\0') {
                                 // Check if already playing
                                 if (midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) {
                                     // Already playing - stop it
@@ -4590,6 +4666,103 @@ int main(int argc, char* argv[]) {
                         ImGui::SetScrollY(target_scroll);
 
                         ImGui::EndChild();
+                    }
+                }
+            }
+            else if (ui_mode == UI_MODE_SEQUENCES) {
+                // SEQUENCES MODE: Control MIDI sequence playback
+                ImGui::Text("SEQUENCE PLAYER");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (!sequence_manager) {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Sequence manager not initialized");
+                } else {
+                    int num_sequences = midi_sequence_manager_get_count(sequence_manager);
+
+                    if (num_sequences == 0) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No sequences loaded in RSX file");
+                        ImGui::Spacing();
+                        ImGui::TextWrapped("Add a [Sequence1] section to your RSX file to define sequences.");
+                    } else {
+                        // Start mode selector
+                        ImGui::Text("Start Mode:");
+                        ImGui::SameLine();
+                        SequenceStartMode current_mode = midi_sequence_manager_get_start_mode(sequence_manager);
+                        const char* mode_names[] = { "Immediate", "Quantized (Row 0)" };
+                        int mode_idx = (int)current_mode;
+
+                        ImGui::SetNextItemWidth(200.0f);
+                        if (ImGui::Combo("##start_mode", &mode_idx, mode_names, 2)) {
+                            midi_sequence_manager_set_start_mode(sequence_manager, (SequenceStartMode)mode_idx);
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        // Get current pulse from sequencer
+                        int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+
+                        // Display sequences
+                        ImGui::BeginChild("##sequences_scroll", ImVec2(rightW - 32.0f, contentHeight - 120.0f), true);
+
+                        for (int i = 0; i < num_sequences; i++) {
+                            ImGui::PushID(i);
+
+                            bool is_playing = midi_sequence_manager_is_playing(sequence_manager, i);
+
+                            // Sequence number and status
+                            ImGui::Text("Sequence %d", i + 1);
+                            ImGui::SameLine(150.0f);
+
+                            // Status indicator
+                            if (is_playing) {
+                                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "[PLAYING]");
+                            } else {
+                                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[STOPPED]");
+                            }
+
+                            // Play/Stop button
+                            ImGui::SameLine(300.0f);
+                            if (is_playing) {
+                                if (ImGui::Button("STOP", ImVec2(100.0f, 0.0f))) {
+                                    midi_sequence_manager_stop(sequence_manager, i);
+                                }
+                            } else {
+                                if (ImGui::Button("PLAY", ImVec2(100.0f, 0.0f))) {
+                                    midi_sequence_manager_play(sequence_manager, i, current_pulse);
+                                }
+                            }
+
+                            // Show current phrase info if playing
+                            if (is_playing) {
+                                MidiSequencePlayer* player = midi_sequence_manager_get_player(sequence_manager, i);
+                                if (player) {
+                                    int phrase_idx = midi_sequence_player_get_current_phrase(player);
+                                    int phrase_loop = midi_sequence_player_get_current_phrase_loop(player);
+                                    int phrase_count = midi_sequence_player_get_phrase_count(player);
+
+                                    ImGui::SameLine();
+                                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.3f, 1.0f),
+                                                      "Phrase %d/%d (loop %d)",
+                                                      phrase_idx + 1, phrase_count, phrase_loop);
+                                }
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            ImGui::PopID();
+                        }
+
+                        ImGui::EndChild();
+
+                        // Stop All button
+                        if (ImGui::Button("STOP ALL", ImVec2(150.0f, 40.0f))) {
+                            midi_sequence_manager_stop_all(sequence_manager);
+                        }
                     }
                 }
             }
@@ -5325,6 +5498,9 @@ int main(int argc, char* argv[]) {
     }
     if (midi_pad_player) {
         midi_file_pad_player_destroy(midi_pad_player);
+    }
+    if (sequence_manager) {
+        midi_sequence_manager_destroy(sequence_manager);
     }
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);

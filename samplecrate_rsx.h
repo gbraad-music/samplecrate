@@ -12,6 +12,8 @@ extern "C" {
 #define RSX_MAX_PATH 512
 #define RSX_MAX_DESCRIPTION 64
 #define RSX_MAX_SAMPLES_PER_PROGRAM 64  // Max samples per program
+#define RSX_MAX_SEQUENCES 16  // Max number of sequences (tracks)
+#define RSX_MAX_PHRASES_PER_SEQUENCE 64  // Max phrases per sequence
 
 // Effects settings for one effects chain
 typedef struct {
@@ -77,6 +79,22 @@ typedef enum {
     PROGRAM_MODE_SAMPLES = 1      // Build from sample list
 } RSXProgramMode;
 
+// Phrase definition for a sequence
+typedef struct {
+    char midi_file[RSX_MAX_PATH];       // MIDI file path
+    char name[RSX_MAX_DESCRIPTION];     // Phrase name/description
+    int loop_count;                     // How many times to play (0 = infinite loop on this phrase)
+} RSXPhrase;
+
+// Sequence (track) definition
+typedef struct {
+    char name[RSX_MAX_DESCRIPTION];     // Sequence name
+    RSXPhrase phrases[RSX_MAX_PHRASES_PER_SEQUENCE];  // Array of phrases
+    int num_phrases;                    // Number of phrases in this sequence
+    int enabled;                        // 1=enabled, 0=disabled
+    int loop;                           // 1=loop entire sequence, 0=play once
+} RSXSequence;
+
 // Note trigger pad configuration
 typedef struct {
     int note;                           // MIDI note number
@@ -88,6 +106,7 @@ typedef struct {
     int enabled;                        // 1=enabled, 0=disabled
     int program;                        // Program index (0-3 for prog 1-4, -1=current program)
     char midi_file[RSX_MAX_PATH];       // MIDI file path (empty = single note mode, non-empty = play MIDI file)
+    int sequence_index;                 // Sequence index to trigger (-1 = none, 0+ = sequence number)
 } NoteTriggerPad;
 
 // RSX file content
@@ -122,6 +141,10 @@ typedef struct {
 
     NoteTriggerPad pads[RSX_MAX_NOTE_PADS];
     int num_pads;
+
+    // Sequences (tracks with multiple phrases)
+    RSXSequence sequences[RSX_MAX_SEQUENCES];
+    int num_sequences;
 
     // Note suppression (128 MIDI notes, 0-127)
     // [note] = global suppression (affects all programs)

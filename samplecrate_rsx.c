@@ -93,6 +93,15 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
     }
     rsx->num_pads = 0;
 
+    // Initialize sequences
+    rsx->num_sequences = 0;
+    for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
+        rsx->sequences[i].name[0] = '\0';
+        rsx->sequences[i].num_phrases = 0;
+        rsx->sequences[i].enabled = 1;
+        rsx->sequences[i].loop = 1;  // Default: loop sequence
+    }
+
     // Initialize FX chain enables (default ON)
     rsx->master_fx_enable = 1;
     for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
@@ -115,6 +124,7 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->pads[i].volume = NAN;  // Not set
         rsx->pads[i].enabled = 1;
         rsx->pads[i].program = -1;  // -1 = use current program
+        rsx->pads[i].sequence_index = -1;  // -1 = no sequence trigger
     }
 
     // Initialize note suppression (all notes enabled by default)
@@ -404,6 +414,56 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                 }
             }
         }
+        // Handle [Sequences] or [Sequence1-16] sections (case-insensitive)
+        else if (strcasecmp(section, "Sequences") == 0 ||
+                 (strncasecmp(section, "Sequence", 8) == 0 && isdigit(section[8]))) {
+
+            // If it's a numbered section like [Sequence1], extract the number
+            int seq_num = -1;
+            if (strncasecmp(section, "Sequence", 8) == 0 && isdigit(section[8])) {
+                seq_num = atoi(section + 8);
+                if (seq_num < 1 || seq_num > RSX_MAX_SEQUENCES) continue;
+            }
+
+            // Parse sequence settings
+            if (seq_num > 0) {
+                int seq_idx = seq_num - 1;
+
+                if (strcmp(key, "name") == 0) {
+                    strncpy(rsx->sequences[seq_idx].name, value, sizeof(rsx->sequences[seq_idx].name) - 1);
+                    rsx->sequences[seq_idx].name[sizeof(rsx->sequences[seq_idx].name) - 1] = '\0';
+                    if (seq_num > rsx->num_sequences) {
+                        rsx->num_sequences = seq_num;
+                    }
+                } else if (strcmp(key, "enabled") == 0) {
+                    rsx->sequences[seq_idx].enabled = atoi(value);
+                } else if (strcmp(key, "loop") == 0) {
+                    rsx->sequences[seq_idx].loop = atoi(value);
+                } else if (strcmp(key, "num_phrases") == 0) {
+                    rsx->sequences[seq_idx].num_phrases = atoi(value);
+                    if (seq_num > rsx->num_sequences) {
+                        rsx->num_sequences = seq_num;
+                    }
+                } else if (strncmp(key, "phrase_", 7) == 0) {
+                    // Parse phrase_N_file or phrase_N_name or phrase_N_loops
+                    int phrase_num = atoi(key + 7);
+                    if (phrase_num >= 1 && phrase_num <= RSX_MAX_PHRASES_PER_SEQUENCE) {
+                        int phrase_idx = phrase_num - 1;
+                        RSXPhrase* phrase = &rsx->sequences[seq_idx].phrases[phrase_idx];
+
+                        if (strstr(key, "_file") != NULL) {
+                            strncpy(phrase->midi_file, value, sizeof(phrase->midi_file) - 1);
+                            phrase->midi_file[sizeof(phrase->midi_file) - 1] = '\0';
+                        } else if (strstr(key, "_name") != NULL) {
+                            strncpy(phrase->name, value, sizeof(phrase->name) - 1);
+                            phrase->name[sizeof(phrase->name) - 1] = '\0';
+                        } else if (strstr(key, "_loops") != NULL) {
+                            phrase->loop_count = atoi(value);
+                        }
+                    }
+                }
+            }
+        }
         // Handle [NoteTriggerPads] section (case-insensitive)
         else if (strcasecmp(section, "NoteTriggerPads") == 0) {
             // Parse pad_N<number>_<property> format
@@ -443,6 +503,8 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                 } else if (strcmp(prop, "midi_file") == 0) {
                     strncpy(rsx->pads[pad_idx].midi_file, value, sizeof(rsx->pads[pad_idx].midi_file) - 1);
                     rsx->pads[pad_idx].midi_file[sizeof(rsx->pads[pad_idx].midi_file) - 1] = '\0';
+                } else if (strcmp(prop, "sequence") == 0) {
+                    rsx->pads[pad_idx].sequence_index = atoi(value) - 1;  // Convert from 1-based to 0-based
                 }
             }
         }
@@ -599,6 +661,37 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
     }
     fprintf(f, "\n");
 
+    // Write sequences
+    if (rsx->num_sequences > 0) {
+        for (int i = 0; i < rsx->num_sequences; i++) {
+            RSXSequence* seq = &rsx->sequences[i];
+
+            // Skip empty sequences
+            if (seq->num_phrases == 0) continue;
+
+            fprintf(f, "[Sequence%d]\n", i + 1);
+            if (seq->name[0] != '\0') {
+                fprintf(f, "name=\"%s\"\n", seq->name);
+            }
+            fprintf(f, "enabled=%d\n", seq->enabled);
+            fprintf(f, "loop=%d  ; 1=loop sequence, 0=play once\n", seq->loop);
+            fprintf(f, "num_phrases=%d\n", seq->num_phrases);
+
+            // Write phrases
+            for (int p = 0; p < seq->num_phrases; p++) {
+                RSXPhrase* phrase = &seq->phrases[p];
+                int phrase_num = p + 1;
+
+                fprintf(f, "phrase_%d_file=\"%s\"\n", phrase_num, phrase->midi_file);
+                if (phrase->name[0] != '\0') {
+                    fprintf(f, "phrase_%d_name=\"%s\"\n", phrase_num, phrase->name);
+                }
+                fprintf(f, "phrase_%d_loops=%d  ; 0=infinite\n", phrase_num, phrase->loop_count);
+            }
+            fprintf(f, "\n");
+        }
+    }
+
     // Write note trigger pads
     fprintf(f, "[NoteTriggerPads]\n");
     for (int i = 0; i < rsx->num_pads; i++) {
@@ -638,6 +731,10 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
 
         if (rsx->pads[i].midi_file[0] != '\0') {
             fprintf(f, "pad_N%d_midi_file=\"%s\"\n", pad_num, rsx->pads[i].midi_file);
+        }
+
+        if (rsx->pads[i].sequence_index >= 0) {
+            fprintf(f, "pad_N%d_sequence=%d\n", pad_num, rsx->pads[i].sequence_index + 1);  // Save as 1-based
         }
 
         fprintf(f, "\n");
