@@ -19,7 +19,7 @@ typedef struct {
 
     // Synths
     sfizz_synth_t* synth;                        // Legacy/main synth
-    sfizz_synth_t* program_synths[4];            // Per-program synths
+    sfizz_synth_t* program_synths[RSX_MAX_PROGRAMS];  // Per-program synths
 
     // MIDI file player
     MidiFilePadPlayer* midi_pad_player;
@@ -27,13 +27,13 @@ typedef struct {
 
     // Effects
     RegrooveEffects* effects_master;
-    RegrooveEffects* effects_program[4];
+    RegrooveEffects* effects_program[RSX_MAX_PROGRAMS];  // Per-program FX chains
 
     // Mixer
     SamplecrateMixer mixer;
 
     // Note suppression state
-    bool note_suppressed[128][5];  // [note][program] (0=global, 1-4=programs)
+    bool note_suppressed[128][RSX_MAX_PROGRAMS + 1];  // [note][program] (0=global, 1-128=programs)
 
     // Current state
     int current_program;

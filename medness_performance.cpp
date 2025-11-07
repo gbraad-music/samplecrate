@@ -1,4 +1,5 @@
-#include "midi_sequence_manager.h"
+#include "medness_performance.h"
+#include "medness_sequencer.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,8 +13,9 @@ typedef struct {
     int start_pulse;      // At which pulse to start
 } QueuedSequence;
 
-struct MidiSequenceManager {
-    MidiSequencePlayer* players[RSX_MAX_SEQUENCES];
+struct MednessPerformance {
+    MednessSequencer* sequencer;  // Reference to shared sequencer
+    MednessSequence* players[RSX_MAX_SEQUENCES];
     int num_sequences;
     SequenceStartMode start_mode;
 
@@ -22,10 +24,13 @@ struct MidiSequenceManager {
     int num_queued;
 
     // Callbacks (shared by all sequences)
-    MidiSequenceEventCallback midi_callback;
+    MednessSequenceEventCallback midi_callback;
     void* midi_userdata;
-    MidiSequencePhraseChangeCallback phrase_callback;
+    MednessSequencePhraseChangeCallback phrase_callback;
     void* phrase_userdata;
+
+    // Per-sequence program numbers (for routing MIDI to correct synth)
+    int sequence_programs[RSX_MAX_SEQUENCES];
 
     float tempo_bpm;
 };
@@ -67,9 +72,9 @@ static int calculate_next_start_pulse(SequenceStartMode mode, int current_pulse)
     }
 }
 
-MidiSequenceManager* midi_sequence_manager_create(void) {
-    MidiSequenceManager* mgr = new MidiSequenceManager();
-    memset(mgr, 0, sizeof(MidiSequenceManager));
+MednessPerformance* medness_performance_create(void) {
+    MednessPerformance* mgr = new MednessPerformance();
+    memset(mgr, 0, sizeof(MednessPerformance));
 
     mgr->start_mode = SEQUENCE_START_QUANTIZED;  // Default: queued=1 (bar-quantized)
     mgr->tempo_bpm = 120.0f;
@@ -77,26 +82,31 @@ MidiSequenceManager* midi_sequence_manager_create(void) {
     return mgr;
 }
 
-void midi_sequence_manager_destroy(MidiSequenceManager* manager) {
+void medness_performance_set_sequencer(MednessPerformance* manager, MednessSequencer* sequencer) {
+    if (!manager) return;
+    manager->sequencer = sequencer;
+}
+
+void medness_performance_destroy(MednessPerformance* manager) {
     if (!manager) return;
 
     // Destroy all sequence players
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_destroy(manager->players[i]);
+            medness_sequence_destroy(manager->players[i]);
         }
     }
 
     delete manager;
 }
 
-int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
+int medness_performance_load_from_rsx(MednessPerformance* manager,
                                         const char* rsx_path,
                                         SamplecrateRSX* rsx) {
     if (!manager || !rsx_path || !rsx) return -1;
 
     // Clear existing sequences
-    midi_sequence_manager_clear(manager);
+    medness_performance_clear(manager);
 
     std::cout << "[SEQUENCE MANAGER] Loading " << rsx->num_sequences << " sequences from RSX" << std::endl;
 
@@ -117,11 +127,14 @@ int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
                   << " (" << seq_def->num_phrases << " phrases)" << std::endl;
 
         // Create sequence player
-        MidiSequencePlayer* seq = midi_sequence_player_create();
+        MednessSequence* seq = medness_sequence_create();
         if (!seq) {
             std::cerr << "[SEQUENCE MANAGER] Failed to create player for sequence " << i << std::endl;
             continue;
         }
+
+        // Set sequencer reference and slot (pads use 0-31, sequences use 32+)
+        medness_sequence_set_sequencer(seq, manager->sequencer, 32 + i);
 
         // Add phrases
         for (int p = 0; p < seq_def->num_phrases; p++) {
@@ -134,7 +147,7 @@ int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
             std::cout << "  Adding phrase " << p << ": " << phrase->name
                       << " (loops: " << phrase->loop_count << ")" << std::endl;
 
-            if (midi_sequence_player_add_phrase(seq, full_path,
+            if (medness_sequence_add_phrase(seq, full_path,
                                                phrase->loop_count,
                                                phrase->name) < 0) {
                 std::cerr << "  Failed to load phrase: " << phrase->name << " (" << full_path << ")" << std::endl;
@@ -142,15 +155,19 @@ int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
         }
 
         // Configure sequence
-        midi_sequence_player_set_tempo(seq, manager->tempo_bpm);
-        midi_sequence_player_set_loop(seq, seq_def->loop);
+        medness_sequence_set_tempo(seq, manager->tempo_bpm);
+        medness_sequence_set_loop(seq, seq_def->loop);
+
+        // Store sequence's program number
+        manager->sequence_programs[i] = seq_def->program_number;
 
         // Set callbacks (if already set)
+        // Pass pointer to this sequence's program number as userdata
         if (manager->midi_callback) {
-            midi_sequence_player_set_callback(seq, manager->midi_callback, manager->midi_userdata);
+            medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[i]);
         }
         if (manager->phrase_callback) {
-            midi_sequence_player_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
+            medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
         }
 
         manager->players[i] = seq;
@@ -163,12 +180,12 @@ int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
     return manager->num_sequences;
 }
 
-void midi_sequence_manager_clear(MidiSequenceManager* manager) {
+void medness_performance_clear(MednessPerformance* manager) {
     if (!manager) return;
 
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_destroy(manager->players[i]);
+            medness_sequence_destroy(manager->players[i]);
             manager->players[i] = nullptr;
         }
     }
@@ -177,21 +194,21 @@ void midi_sequence_manager_clear(MidiSequenceManager* manager) {
     manager->num_queued = 0;
 }
 
-int midi_sequence_manager_get_count(MidiSequenceManager* manager) {
+int medness_performance_get_count(MednessPerformance* manager) {
     if (!manager) return 0;
     return manager->num_sequences;
 }
 
-void midi_sequence_manager_play(MidiSequenceManager* manager, int seq_index, int current_pulse) {
+void medness_performance_play(MednessPerformance* manager, int seq_index, int current_pulse) {
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return;
 
-    MidiSequencePlayer* seq = manager->players[seq_index];
+    MednessSequence* seq = manager->players[seq_index];
     if (!seq) return;
 
     if (manager->start_mode == SEQUENCE_START_IMMEDIATE) {
         // Start immediately
         std::cout << "[SEQUENCE MANAGER] Starting sequence " << seq_index << " immediately" << std::endl;
-        midi_sequence_player_play(seq);
+        medness_sequence_play(seq);
     } else {
         // Queue for quantized start
         int start_pulse = calculate_next_start_pulse(manager->start_mode, current_pulse);
@@ -218,7 +235,7 @@ void midi_sequence_manager_play(MidiSequenceManager* manager, int seq_index, int
     }
 }
 
-void midi_sequence_manager_stop(MidiSequenceManager* manager, int seq_index) {
+void medness_performance_stop(MednessPerformance* manager, int seq_index) {
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return;
 
     // Cancel any queued start
@@ -229,13 +246,13 @@ void midi_sequence_manager_stop(MidiSequenceManager* manager, int seq_index) {
         }
     }
 
-    MidiSequencePlayer* seq = manager->players[seq_index];
+    MednessSequence* seq = manager->players[seq_index];
     if (seq) {
-        midi_sequence_player_stop(seq);
+        medness_sequence_stop(seq);
     }
 }
 
-void midi_sequence_manager_stop_all(MidiSequenceManager* manager) {
+void medness_performance_stop_all(MednessPerformance* manager) {
     if (!manager) return;
 
     // Clear all queued starts
@@ -247,31 +264,31 @@ void midi_sequence_manager_stop_all(MidiSequenceManager* manager) {
     // Stop all playing sequences
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_stop(manager->players[i]);
+            medness_sequence_stop(manager->players[i]);
         }
     }
 }
 
-int midi_sequence_manager_is_playing(MidiSequenceManager* manager, int seq_index) {
+int medness_performance_is_playing(MednessPerformance* manager, int seq_index) {
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return 0;
 
-    MidiSequencePlayer* seq = manager->players[seq_index];
+    MednessSequence* seq = manager->players[seq_index];
     if (!seq) return 0;
 
-    return midi_sequence_player_is_playing(seq);
+    return medness_sequence_is_playing(seq);
 }
 
-void midi_sequence_manager_set_start_mode(MidiSequenceManager* manager, SequenceStartMode mode) {
+void medness_performance_set_start_mode(MednessPerformance* manager, SequenceStartMode mode) {
     if (!manager) return;
     manager->start_mode = mode;
 }
 
-SequenceStartMode midi_sequence_manager_get_start_mode(MidiSequenceManager* manager) {
+SequenceStartMode medness_performance_get_start_mode(MednessPerformance* manager) {
     if (!manager) return SEQUENCE_START_IMMEDIATE;
     return manager->start_mode;
 }
 
-void midi_sequence_manager_set_tempo(MidiSequenceManager* manager, float bpm) {
+void medness_performance_set_tempo(MednessPerformance* manager, float bpm) {
     if (!manager || bpm <= 0.0f) return;
 
     manager->tempo_bpm = bpm;
@@ -279,13 +296,13 @@ void midi_sequence_manager_set_tempo(MidiSequenceManager* manager, float bpm) {
     // Update all sequence players
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_set_tempo(manager->players[i], bpm);
+            medness_sequence_set_tempo(manager->players[i], bpm);
         }
     }
 }
 
-void midi_sequence_manager_set_midi_callback(MidiSequenceManager* manager,
-                                             MidiSequenceEventCallback callback,
+void medness_performance_set_midi_callback(MednessPerformance* manager,
+                                             MednessSequenceEventCallback callback,
                                              void* userdata) {
     if (!manager) return;
 
@@ -295,13 +312,13 @@ void midi_sequence_manager_set_midi_callback(MidiSequenceManager* manager,
     // Update all sequence players
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_set_callback(manager->players[i], callback, userdata);
+            medness_sequence_set_callback(manager->players[i], callback, userdata);
         }
     }
 }
 
-void midi_sequence_manager_set_phrase_change_callback(MidiSequenceManager* manager,
-                                                      MidiSequencePhraseChangeCallback callback,
+void medness_performance_set_phrase_change_callback(MednessPerformance* manager,
+                                                      MednessSequencePhraseChangeCallback callback,
                                                       void* userdata) {
     if (!manager) return;
 
@@ -311,12 +328,12 @@ void midi_sequence_manager_set_phrase_change_callback(MidiSequenceManager* manag
     // Update all sequence players
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_set_phrase_change_callback(manager->players[i], callback, userdata);
+            medness_sequence_set_phrase_change_callback(manager->players[i], callback, userdata);
         }
     }
 }
 
-void midi_sequence_manager_update_samples(MidiSequenceManager* manager,
+void medness_performance_update_samples(MednessPerformance* manager,
                                          int num_samples,
                                          int sample_rate,
                                          int current_pulse) {
@@ -344,9 +361,9 @@ void midi_sequence_manager_update_samples(MidiSequenceManager* manager,
                 std::cout << "[SEQUENCE MANAGER] Starting queued sequence " << q->seq_index
                           << " at pulse " << current_pulse << std::endl;
 
-                MidiSequencePlayer* seq = manager->players[q->seq_index];
+                MednessSequence* seq = manager->players[q->seq_index];
                 if (seq) {
-                    midi_sequence_player_play(seq);
+                    medness_sequence_play(seq);
                 }
 
                 // Clear queue entry
@@ -359,7 +376,7 @@ void midi_sequence_manager_update_samples(MidiSequenceManager* manager,
     // Update all playing sequences
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            midi_sequence_player_update_samples(manager->players[i],
+            medness_sequence_update_samples(manager->players[i],
                                                num_samples,
                                                sample_rate,
                                                current_pulse);
@@ -367,18 +384,18 @@ void midi_sequence_manager_update_samples(MidiSequenceManager* manager,
     }
 }
 
-void midi_sequence_manager_jump_to_phrase(MidiSequenceManager* manager,
+void medness_performance_jump_to_phrase(MednessPerformance* manager,
                                          int seq_index,
                                          int phrase_index) {
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return;
 
-    MidiSequencePlayer* seq = manager->players[seq_index];
+    MednessSequence* seq = manager->players[seq_index];
     if (seq) {
-        midi_sequence_player_jump_to_phrase(seq, phrase_index);
+        medness_sequence_jump_to_phrase(seq, phrase_index);
     }
 }
 
-MidiSequencePlayer* midi_sequence_manager_get_player(MidiSequenceManager* manager, int seq_index) {
+MednessSequence* medness_performance_get_player(MednessPerformance* manager, int seq_index) {
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return nullptr;
     return manager->players[seq_index];
 }

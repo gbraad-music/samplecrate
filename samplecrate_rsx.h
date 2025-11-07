@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define RSX_MAX_NOTE_PADS 32  // Support expanded pads mode (2 sets of 16)
-#define RSX_MAX_PROGRAMS 4    // Support up to 4 programs (scenes)
+#define RSX_MAX_PROGRAMS 64   // Support 64 programs (GM bank size, practical limit)
 #define RSX_MAX_PATH 512
 #define RSX_MAX_DESCRIPTION 64
 #define RSX_MAX_SAMPLES_PER_PROGRAM 64  // Max samples per program
@@ -93,6 +93,7 @@ typedef struct {
     int num_phrases;                    // Number of phrases in this sequence
     int enabled;                        // 1=enabled, 0=disabled
     int loop;                           // 1=loop entire sequence, 0=play once
+    int program_number;                 // Program to target (0-3 for programs 1-4)
 } RSXSequence;
 
 // Note trigger pad configuration
@@ -148,9 +149,9 @@ typedef struct {
 
     // Note suppression (128 MIDI notes, 0-127)
     // [note] = global suppression (affects all programs)
-    // [note] = per-program suppression for programs 0-3
+    // [note] = per-program suppression for all programs
     unsigned char note_suppressed_global[128];      // 1=suppressed, 0=not suppressed
-    unsigned char note_suppressed_program[4][128];  // Per-program suppression
+    unsigned char note_suppressed_program[RSX_MAX_PROGRAMS][128];  // Per-program suppression
 } SamplecrateRSX;
 
 // Create a new RSX structure with defaults

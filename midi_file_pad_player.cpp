@@ -24,9 +24,9 @@ struct MidiFilePadPlayer {
 static void pad_midi_callback(int note, int velocity, int on, void* userdata) {
     PadCallbackContext* ctx = (PadCallbackContext*)userdata;
     if (ctx && ctx->pad_player && ctx->pad_player->midi_callback) {
-        // Pass the per-pad userdata to the callback
-        void* pad_userdata = ctx->pad_player->userdatas[ctx->pad_index];
-        ctx->pad_player->midi_callback(note, velocity, on, pad_userdata);
+        // Pass the PadCallbackContext directly so main.cpp can identify this as a pad event
+        // (main.cpp will distinguish pads from sequences by checking if userdata is a PadCallbackContext*)
+        ctx->pad_player->midi_callback(note, velocity, on, ctx);
     }
 }
 
@@ -188,4 +188,29 @@ MednessTrack* midi_file_pad_player_get_track(MidiFilePadPlayer* pad_player, int 
         return nullptr;
     }
     return pad_player->tracks[pad_index];
+}
+
+// Helper: Check if userdata is a pad context
+// We use a simple heuristic: pad contexts are struct pointers with known memory layout
+// Sequence events use int* which will have a small value when dereferenced
+int midi_file_is_pad_context(void* userdata) {
+    if (!userdata) return 0;
+
+    // Try to dereference as PadCallbackContext
+    PadCallbackContext* ctx = (PadCallbackContext*)userdata;
+
+    // Simple sanity check: pad_index should be in valid range (0-31)
+    // and pad_player should be non-null
+    if (ctx->pad_player && ctx->pad_index >= 0 && ctx->pad_index < MAX_PAD_PLAYERS) {
+        return 1;
+    }
+    return 0;
+}
+
+// Helper: Get pad index from pad context
+int midi_file_get_pad_index(void* userdata) {
+    if (!midi_file_is_pad_context(userdata)) return -1;
+
+    PadCallbackContext* ctx = (PadCallbackContext*)userdata;
+    return ctx->pad_index;
 }

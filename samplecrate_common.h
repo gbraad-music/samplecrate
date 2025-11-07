@@ -2,6 +2,7 @@
 #define SAMPLECRATE_COMMON_H
 
 #include <stddef.h>
+#include "samplecrate_rsx.h"  // For RSX_MAX_PROGRAMS
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +24,12 @@ typedef struct {
 SamplecrateFileList* samplecrate_filelist_create(void);
 
 // Load files from directory (handles trailing slash automatically)
+// Loads only .rsx and .sfz files (for backward compatibility)
 int samplecrate_filelist_load(SamplecrateFileList *list, const char *dir_path);
+
+// Load files from directory with custom extension filter
+// extensions: comma-separated list like "mid,MID" or "wav,WAV" or NULL for all files
+int samplecrate_filelist_load_filtered(SamplecrateFileList *list, const char *dir_path, const char *extensions);
 
 // Get current file's full path
 const char* samplecrate_filelist_get_current_path(SamplecrateFileList *list, char *buffer, size_t bufsize);
@@ -48,10 +54,10 @@ typedef struct {
     int playback_mute;
 
     // Per-program volumes (for multi-program RSX files)
-    float program_volumes[4];  // Volume for each program (0-3)
-    float program_pans[4];     // Pan for each program (0.0=left, 0.5=center, 1.0=right)
-    int program_mutes[4];      // Mute for each program
-    int program_fx_enable[4];  // FX enable per program (0=disabled, 1=enabled)
+    float program_volumes[RSX_MAX_PROGRAMS];  // Volume for each program
+    float program_pans[RSX_MAX_PROGRAMS];     // Pan for each program (0.0=left, 0.5=center, 1.0=right)
+    int program_mutes[RSX_MAX_PROGRAMS];      // Mute for each program
+    int program_fx_enable[RSX_MAX_PROGRAMS];  // FX enable per program (0=disabled, 1=enabled)
 
     // FX enable toggles (independent)
     int master_fx_enable;      // 0 = disabled, 1 = enabled

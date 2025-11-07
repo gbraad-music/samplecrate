@@ -14,11 +14,24 @@ extern "C" {
 // Now just manages tracks - the sequencer does the actual playing
 typedef struct MidiFilePadPlayer MidiFilePadPlayer;
 
+// Per-pad callback context (opaque in C, but accessible via helper)
+typedef struct PadCallbackContext PadCallbackContext;
+
 // MIDI event callback (same as before for compatibility)
+// NOTE: For pad events, userdata will be a PadCallbackContext*
+// For sequence events, userdata will be an int* pointing to program number
 typedef void (*MidiFileEventCallback)(int note, int velocity, int on, void* userdata);
 
 // Loop callback (same as before for compatibility)
 typedef void (*MidiFileLoopCallback)(void* userdata);
+
+// Helper: Check if userdata is a pad context (vs sequence program number)
+// Returns 1 if pad context, 0 otherwise
+int midi_file_is_pad_context(void* userdata);
+
+// Helper: Get pad index from pad context
+// Returns pad index (0-31) or -1 if invalid
+int midi_file_get_pad_index(void* userdata);
 
 // Create a new pad player manager
 // sequencer: the sequencer that will play the tracks

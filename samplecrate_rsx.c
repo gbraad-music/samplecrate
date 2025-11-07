@@ -239,6 +239,61 @@ static void load_effects_setting(RSXEffectsSettings* fx, const char* key, const 
 int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
     if (!rsx || !filepath) return -1;
 
+    // Reset RSX structure to defaults before loading
+    // (preserve the allocated memory, just reset values)
+    rsx->version = 1;
+    rsx->sfz_file[0] = '\0';
+    rsx->num_programs = 0;
+    rsx->num_pads = 0;
+    rsx->num_sequences = 0;
+
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        rsx->program_files[i][0] = '\0';
+        rsx->program_names[i][0] = '\0';
+        rsx->program_volumes[i] = 1.0f;
+        rsx->program_pans[i] = 0.5f;
+        rsx->program_midi_channels[i] = -1;
+        rsx->program_modes[i] = PROGRAM_MODE_SFZ_FILE;
+        rsx->program_sample_counts[i] = 0;
+        rsx->program_fx_enable[i] = 1;
+    }
+
+    // Reset note suppression
+    memset(rsx->note_suppressed_global, 0, sizeof(rsx->note_suppressed_global));
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        memset(rsx->note_suppressed_program[i], 0, sizeof(rsx->note_suppressed_program[i]));
+    }
+
+    // Reset effects to defaults
+    rsx->master_fx_enable = 1;
+    init_effects_defaults(&rsx->master_effects);
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        init_effects_defaults(&rsx->program_effects[i]);
+    }
+
+    // Reset pads
+    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+        rsx->pads[i].note = -1;
+        rsx->pads[i].description[0] = '\0';
+        rsx->pads[i].velocity = 0;
+        rsx->pads[i].pitch_bend = 0.0f;
+        rsx->pads[i].pan = NAN;
+        rsx->pads[i].volume = NAN;
+        rsx->pads[i].enabled = 1;
+        rsx->pads[i].program = -1;
+        rsx->pads[i].midi_file[0] = '\0';
+        rsx->pads[i].sequence_index = -1;
+    }
+
+    // Reset sequences
+    for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
+        rsx->sequences[i].name[0] = '\0';
+        rsx->sequences[i].num_phrases = 0;
+        rsx->sequences[i].enabled = 1;
+        rsx->sequences[i].loop = 1;
+        rsx->sequences[i].program_number = 0;
+    }
+
     FILE* f = fopen(filepath, "r");
     if (!f) {
         fprintf(stderr, "Failed to open RSX file: %s\n", filepath);
@@ -439,6 +494,8 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                     rsx->sequences[seq_idx].enabled = atoi(value);
                 } else if (strcmp(key, "loop") == 0) {
                     rsx->sequences[seq_idx].loop = atoi(value);
+                } else if (strcmp(key, "program_number") == 0) {
+                    rsx->sequences[seq_idx].program_number = atoi(value);
                 } else if (strcmp(key, "num_phrases") == 0) {
                     rsx->sequences[seq_idx].num_phrases = atoi(value);
                     if (seq_num > rsx->num_sequences) {
@@ -675,6 +732,7 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             }
             fprintf(f, "enabled=%d\n", seq->enabled);
             fprintf(f, "loop=%d  ; 1=loop sequence, 0=play once\n", seq->loop);
+            fprintf(f, "program_number=%d  ; Program to target (0-3 for programs 1-4)\n", seq->program_number);
             fprintf(f, "num_phrases=%d\n", seq->num_phrases);
 
             // Write phrases

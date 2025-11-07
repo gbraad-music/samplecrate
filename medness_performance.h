@@ -1,12 +1,15 @@
-#ifndef MIDI_SEQUENCE_MANAGER_H
-#define MIDI_SEQUENCE_MANAGER_H
+#ifndef MEDNESS_PERFORMANCE_H
+#define MEDNESS_PERFORMANCE_H
 
-#include "midi_sequence_player.h"
+#include "medness_sequence.h"
 #include "samplecrate_rsx.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Forward declaration
+typedef struct MednessSequencer MednessSequencer;
 
 // Start mode for sequences
 // SIMPLE MODEL:
@@ -18,75 +21,78 @@ typedef enum {
 } SequenceStartMode;
 
 // Opaque handle for sequence manager
-typedef struct MidiSequenceManager MidiSequenceManager;
+typedef struct MednessPerformance MednessPerformance;
 
 // Create a sequence manager
-MidiSequenceManager* midi_sequence_manager_create(void);
+MednessPerformance* medness_performance_create(void);
 
 // Destroy the sequence manager
-void midi_sequence_manager_destroy(MidiSequenceManager* manager);
+void medness_performance_destroy(MednessPerformance* manager);
 
 // Load sequences from an RSX file
 // rsx_path: path to the RSX file (for resolving relative MIDI paths)
 // rsx: loaded RSX structure
 // Returns: number of sequences loaded, or -1 on error
-int midi_sequence_manager_load_from_rsx(MidiSequenceManager* manager,
+int medness_performance_load_from_rsx(MednessPerformance* manager,
                                         const char* rsx_path,
                                         SamplecrateRSX* rsx);
 
 // Clear all sequences
-void midi_sequence_manager_clear(MidiSequenceManager* manager);
+void medness_performance_clear(MednessPerformance* manager);
+
+// Set the sequencer reference (must be called before loading sequences)
+void medness_performance_set_sequencer(MednessPerformance* manager, MednessSequencer* sequencer);
 
 // Get number of sequences loaded
-int midi_sequence_manager_get_count(MidiSequenceManager* manager);
+int medness_performance_get_count(MednessPerformance* manager);
 
 // Play a specific sequence
-void midi_sequence_manager_play(MidiSequenceManager* manager, int seq_index, int current_pulse);
+void medness_performance_play(MednessPerformance* manager, int seq_index, int current_pulse);
 
 // Stop a specific sequence
-void midi_sequence_manager_stop(MidiSequenceManager* manager, int seq_index);
+void medness_performance_stop(MednessPerformance* manager, int seq_index);
 
 // Stop all sequences
-void midi_sequence_manager_stop_all(MidiSequenceManager* manager);
+void medness_performance_stop_all(MednessPerformance* manager);
 
 // Check if a sequence is playing
-int midi_sequence_manager_is_playing(MidiSequenceManager* manager, int seq_index);
+int medness_performance_is_playing(MednessPerformance* manager, int seq_index);
 
 // Set the start mode (immediate, quantized, etc.)
-void midi_sequence_manager_set_start_mode(MidiSequenceManager* manager, SequenceStartMode mode);
+void medness_performance_set_start_mode(MednessPerformance* manager, SequenceStartMode mode);
 
 // Get the current start mode
-SequenceStartMode midi_sequence_manager_get_start_mode(MidiSequenceManager* manager);
+SequenceStartMode medness_performance_get_start_mode(MednessPerformance* manager);
 
 // Set tempo for all sequences
-void midi_sequence_manager_set_tempo(MidiSequenceManager* manager, float bpm);
+void medness_performance_set_tempo(MednessPerformance* manager, float bpm);
 
 // Set MIDI event callback for all sequences
-void midi_sequence_manager_set_midi_callback(MidiSequenceManager* manager,
-                                             MidiSequenceEventCallback callback,
+void medness_performance_set_midi_callback(MednessPerformance* manager,
+                                             MednessSequenceEventCallback callback,
                                              void* userdata);
 
 // Set phrase change callback for all sequences
-void midi_sequence_manager_set_phrase_change_callback(MidiSequenceManager* manager,
-                                                      MidiSequencePhraseChangeCallback callback,
+void medness_performance_set_phrase_change_callback(MednessPerformance* manager,
+                                                      MednessSequencePhraseChangeCallback callback,
                                                       void* userdata);
 
 // Update all sequences (call from audio callback)
-void midi_sequence_manager_update_samples(MidiSequenceManager* manager,
+void medness_performance_update_samples(MednessPerformance* manager,
                                          int num_samples,
                                          int sample_rate,
                                          int current_pulse);
 
 // Jump to a specific phrase in a sequence
-void midi_sequence_manager_jump_to_phrase(MidiSequenceManager* manager,
+void medness_performance_jump_to_phrase(MednessPerformance* manager,
                                          int seq_index,
                                          int phrase_index);
 
 // Get the underlying sequence player for direct access
-MidiSequencePlayer* midi_sequence_manager_get_player(MidiSequenceManager* manager, int seq_index);
+MednessSequence* medness_performance_get_player(MednessPerformance* manager, int seq_index);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // MIDI_SEQUENCE_MANAGER_H
+#endif // MEDNESS_PERFORMANCE_H

@@ -23,6 +23,38 @@ static int is_samplecrate_file(const char *filename) {
     return (strcmp(ext, ".rsx") == 0 || strcmp(ext, ".sfz") == 0);
 }
 
+// Helper: Check if file matches any extension in comma-separated list
+// extensions: "mid,MID,wav,WAV" or NULL for all files
+static int matches_extension_filter(const char *filename, const char *extensions) {
+    if (!extensions) return 1;  // NULL = accept all files
+
+    const char *dot = strrchr(filename, '.');
+    if (!dot) return 0;  // No extension
+
+    const char *file_ext = dot + 1;  // Skip the dot
+
+    // Check against each extension in the comma-separated list
+    char ext_copy[256];
+    strncpy(ext_copy, extensions, sizeof(ext_copy) - 1);
+    ext_copy[sizeof(ext_copy) - 1] = '\0';
+
+    char *token = strtok(ext_copy, ",");
+    while (token) {
+        // Trim whitespace
+        while (*token == ' ') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && *end == ' ') *end-- = '\0';
+
+        // Compare (case-insensitive)
+        if (strcasecmp(file_ext, token) == 0) {
+            return 1;
+        }
+        token = strtok(NULL, ",");
+    }
+
+    return 0;
+}
+
 // Helper: Normalize directory path (remove trailing slash)
 static void normalize_directory_path(char *path) {
     if (!path) return;
@@ -114,6 +146,73 @@ int samplecrate_filelist_load(SamplecrateFileList *list, const char *dir_path) {
     return list->count;
 }
 
+int samplecrate_filelist_load_filtered(SamplecrateFileList *list, const char *dir_path, const char *extensions) {
+    if (!list || !dir_path) return -1;
+
+    // Free existing files
+    if (list->filenames) {
+        for (int i = 0; i < list->count; i++) {
+            free(list->filenames[i]);
+        }
+    }
+    list->count = 0;
+    list->current_index = 0;
+
+    // Normalize and store directory path (remove trailing slash)
+    snprintf(list->directory, COMMON_MAX_PATH, "%s", dir_path);
+    normalize_directory_path(list->directory);
+
+#ifdef _WIN32
+    // Windows directory scanning using _findfirst/_findnext
+    char search_path[COMMON_MAX_PATH];
+    snprintf(search_path, sizeof(search_path), "%s/*.*", list->directory);
+
+    struct _finddata_t fileinfo;
+    intptr_t handle = _findfirst(search_path, &fileinfo);
+    if (handle == -1) return -1;
+
+    do {
+        // Skip directories
+        if (fileinfo.attrib & _A_SUBDIR) continue;
+
+        // Check if it matches the extension filter
+        if (matches_extension_filter(fileinfo.name, extensions) && list->count < COMMON_MAX_FILES) {
+            list->filenames[list->count++] = strdup(fileinfo.name);
+        }
+    } while (_findnext(handle, &fileinfo) == 0 && list->count < COMMON_MAX_FILES);
+
+    _findclose(handle);
+#else
+    // Unix directory scanning using opendir/readdir
+    DIR *dir = opendir(dir_path);
+    if (!dir) return -1;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && list->count < COMMON_MAX_FILES) {
+        // Check if it matches the extension filter
+        if (!matches_extension_filter(entry->d_name, extensions)) {
+            continue;
+        }
+
+        // Use d_type if available, fallback to stat
+        if (entry->d_type == DT_REG) {
+            list->filenames[list->count++] = strdup(entry->d_name);
+        } else if (entry->d_type == DT_UNKNOWN) {
+            char fullpath[COMMON_MAX_PATH];
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", list->directory, entry->d_name);
+            struct stat st;
+            if (stat(fullpath, &st) == 0 && S_ISREG(st.st_mode)) {
+                list->filenames[list->count++] = strdup(entry->d_name);
+            }
+        }
+    }
+
+    closedir(dir);
+#endif
+
+    return list->count;
+}
+
 const char* samplecrate_filelist_get_current_path(SamplecrateFileList *list, char *buffer, size_t bufsize) {
     if (!list || !buffer || list->count == 0) return NULL;
 
@@ -172,7 +271,7 @@ void samplecrate_mixer_init(SamplecrateMixer* mixer) {
     mixer->playback_mute = 0;
 
     // Initialize per-program volumes
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         mixer->program_volumes[i] = 1.0f;  // 100% volume
         mixer->program_pans[i] = 0.5f;     // Center
         mixer->program_mutes[i] = 0;

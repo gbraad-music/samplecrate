@@ -40,7 +40,7 @@ SamplecrateEngine* samplecrate_engine_create(MednessSequencer* sequencer) {
 
     // Initialize note suppression
     for (int note = 0; note < 128; note++) {
-        for (int prog = 0; prog < 5; prog++) {
+        for (int prog = 0; prog < RSX_MAX_PROGRAMS + 1; prog++) {  // +1 for global (index 0)
             engine->note_suppressed[note][prog] = false;
         }
     }
@@ -118,7 +118,7 @@ void samplecrate_engine_load_note_suppression(SamplecrateEngine* engine) {
     }
 
     // Copy per-program suppression
-    for (int prog = 0; prog < 4; prog++) {
+    for (int prog = 0; prog < RSX_MAX_PROGRAMS; prog++) {
         for (int note = 0; note < 128; note++) {
             engine->note_suppressed[note][prog + 1] = (engine->rsx->note_suppressed_program[prog][note] != 0);
         }
@@ -134,7 +134,7 @@ void samplecrate_engine_save_note_suppression(SamplecrateEngine* engine) {
     }
 
     // Copy per-program suppression
-    for (int prog = 0; prog < 4; prog++) {
+    for (int prog = 0; prog < RSX_MAX_PROGRAMS; prog++) {
         for (int note = 0; note < 128; note++) {
             engine->rsx->note_suppressed_program[prog][note] = engine->note_suppressed[note][prog + 1] ? 1 : 0;
         }

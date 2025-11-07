@@ -9,16 +9,21 @@
 #include <atomic>
 #include <vector>
 #include <map>
+#include <set>
 #include <iostream>
 #include <cstring>
 #include <mutex>
 #include <chrono>
+#include <cmath>
+#include <algorithm>
 #include <libgen.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #ifndef _WIN32
 #include <unistd.h>
 #else
 #include <direct.h>
+#include <io.h>
 #include <stdlib.h>
 #define getcwd _getcwd
 #endif
@@ -35,7 +40,7 @@ extern "C" {
 #include "midi_file_player.h"
 #include "midi_file_pad_player.h"
 #include "midi_sysex.h"
-#include "midi_sequence_manager.h"
+#include "medness_performance.h"
 }
 
 // -----------------------------------------------------------------------------
@@ -52,8 +57,14 @@ static char* cross_platform_realpath(const char* path, char* resolved_path) {
 #endif
 }
 
+// UI Color Constants - Define once, reuse everywhere!
+static const ImVec4 COLOR_BUTTON_ACTIVE = ImVec4(0.85f, 0.70f, 0.20f, 1.0f);   // Yellow/gold for active buttons
+static const ImVec4 COLOR_BUTTON_INACTIVE = ImVec4(0.26f, 0.27f, 0.30f, 1.0f); // Dark gray for inactive
+static const ImVec4 COLOR_BUTTON_AT_LIMIT = ImVec4(0.16f, 0.17f, 0.18f, 1.0f); // Very dark for nav buttons at limit (P-/P+ can't go further)
+static const ImVec4 COLOR_LEARN_ACTIVE = ImVec4(0.90f, 0.15f, 0.18f, 1.0f);    // Red for LEARN mode
+
 sfizz_synth_t* synth = nullptr;  // Current/legacy synth
-sfizz_synth_t* program_synths[4] = {nullptr, nullptr, nullptr, nullptr};  // One synth per program
+sfizz_synth_t* program_synths[RSX_MAX_PROGRAMS] = {nullptr};  // One synth per program
 std::atomic<bool> running(true);
 std::mutex synth_mutex;
 LCD* lcd_display = nullptr;
@@ -64,7 +75,7 @@ int current_velocity = 0;
 SamplecrateMixer mixer;
 SamplecrateConfig config;
 RegrooveEffects* effects_master = nullptr;     // Master FX chain
-RegrooveEffects* effects_program[4] = {nullptr, nullptr, nullptr, nullptr};  // Per-program FX chains
+RegrooveEffects* effects_program[RSX_MAX_PROGRAMS] = {nullptr};  // Per-program FX chains
 
 // Input mappings and MIDI
 InputMappings* input_mappings = nullptr;
@@ -94,7 +105,7 @@ MidiFilePadPlayer* midi_pad_player = nullptr;
 MednessSequencer* sequencer = nullptr;
 
 // MIDI sequence manager (for multi-phrase sequences)
-MidiSequenceManager* sequence_manager = nullptr;
+MednessPerformance* sequence_manager = nullptr;
 
 // Pad index storage for MIDI file callbacks (so each pad knows which program to use)
 int midi_pad_indices[RSX_MAX_NOTE_PADS];
@@ -109,16 +120,26 @@ float active_bpm = 125.0f;  // Actual playback tempo (updated by MIDI clock or m
 float note_pad_fade[RSX_MAX_NOTE_PADS] = {0.0f};           // Normal note trigger fade (white/bright)
 float note_pad_loop_fade[RSX_MAX_NOTE_PADS] = {0.0f};      // Loop restart fade (blue/cyan)
 
+// Sequence visual feedback states
+enum SequencePadState {
+    SEQ_PAD_IDLE = 0,
+    SEQ_PAD_QUEUED = 1,      // BLUE - waiting for row 0
+    SEQ_PAD_PLAYING = 2,     // RED - currently playing
+    SEQ_PAD_NEXT_PHRASE = 3  // YELLOW - next phrase coming
+};
+SequencePadState sequence_pad_states[RSX_MAX_NOTE_PADS] = {SEQ_PAD_IDLE};
+float sequence_pad_blink[RSX_MAX_NOTE_PADS] = {0.0f};  // Blink timer for playing sequences
+
 // Step sequencer visual feedback (16 steps represent 64 rows)
 float step_fade[16] = {0.0f};  // Brightness for each step
 
 // Note suppression state (128 MIDI notes, 0-127)
 // [note][0] = global suppression (program -1)
-// [note][1-4] = per-program suppression for programs 0-3
-bool note_suppressed[128][5] = {false};
+// [note][1-128] = per-program suppression for programs 0-127
+bool note_suppressed[128][RSX_MAX_PROGRAMS + 1] = {false};
 
 // Current program selection (which SFZ is loaded)
-int current_program = 0;  // 0-3 for programs 1-4 (UI selection)
+int current_program = 0;  // 0-127 for programs 1-128 (UI selection)
 int midi_target_program[3] = {0, 0, 0};  // Per-device MIDI routing (set by program change messages)
 
 // MIDI clock tracking
@@ -186,14 +207,15 @@ sfizz_synth_t* held_pad_synth = nullptr;
 
 // UI mode
 enum UIMode {
-    UI_MODE_INSTRUMENT = 0,
-    UI_MODE_MIX = 1,
-    UI_MODE_EFFECTS = 2,
-    UI_MODE_PADS = 3,
-    UI_MODE_TRACK = 4,
-    UI_MODE_SEQUENCES = 5,
-    UI_MODE_MIDI = 6,
-    UI_MODE_SETTINGS = 7
+    UI_MODE_INSTRUMENT = 0,   // CRATE panel - high-level program list
+    UI_MODE_PROGRAM = 1,      // PROG panel - detailed single program view
+    UI_MODE_MIX = 2,
+    UI_MODE_EFFECTS = 3,
+    UI_MODE_PADS = 4,
+    UI_MODE_TRACK = 5,
+    UI_MODE_SEQUENCES = 6,
+    UI_MODE_MIDI = 7,
+    UI_MODE_SETTINGS = 8
 };
 UIMode ui_mode = UI_MODE_PADS;  // Default to PADS view
 
@@ -210,7 +232,7 @@ RegrooveEffects* get_current_effects() {
         return effects_master;
     } else {
         // FX_MODE_PROGRAM - return current program's effects
-        if (current_program >= 0 && current_program < 4) {
+        if (current_program >= 0 && current_program < RSX_MAX_PROGRAMS) {
             return effects_program[current_program];
         }
         return nullptr;
@@ -321,7 +343,7 @@ void load_note_suppression_from_rsx() {
     }
 
     // Copy per-program suppression
-    for (int prog = 0; prog < 4; prog++) {
+    for (int prog = 0; prog < RSX_MAX_PROGRAMS; prog++) {
         for (int note = 0; note < 128; note++) {
             note_suppressed[note][prog + 1] = (rsx->note_suppressed_program[prog][note] != 0);
         }
@@ -338,7 +360,7 @@ void save_note_suppression_to_rsx() {
     }
 
     // Copy per-program suppression
-    for (int prog = 0; prog < 4; prog++) {
+    for (int prog = 0; prog < RSX_MAX_PROGRAMS; prog++) {
         for (int note = 0; note < 128; note++) {
             rsx->note_suppressed_program[prog][note] = note_suppressed[note][prog + 1] ? 1 : 0;
         }
@@ -348,16 +370,26 @@ void save_note_suppression_to_rsx() {
     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
 }
 
-// Helper: reload sequences from RSX file
+// Helper: reload sequences from RSX structure (in memory)
 void reload_sequences() {
-    if (!sequence_manager || !rsx || rsx_file_path.empty()) return;
+    if (!sequence_manager || !rsx) return;
 
-    std::cout << "[Sequences] Loading sequences from RSX file..." << std::endl;
-    int num_sequences = midi_sequence_manager_load_from_rsx(sequence_manager, rsx_file_path.c_str(), rsx);
+    std::cout << "[Sequences] Loading sequences from RSX structure..." << std::endl;
+
+    // Load from RSX structure in memory (not from file)
+    // This allows creating sequences in UI without saving to file first
+    int num_sequences = medness_performance_load_from_rsx(sequence_manager, rsx_file_path.c_str(), rsx);
+
     if (num_sequences > 0) {
         std::cout << "[Sequences] Loaded " << num_sequences << " sequences" << std::endl;
     } else {
-        std::cout << "[Sequences] No sequences found in RSX file" << std::endl;
+        std::cout << "[Sequences] No sequences found" << std::endl;
+    }
+
+    // Auto-save sequences to RSX file
+    if (!rsx_file_path.empty()) {
+        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+        std::cout << "[Sequences] Saved to " << rsx_file_path << std::endl;
     }
 }
 
@@ -811,7 +843,7 @@ void handle_input_event(InputEvent* event) {
                         note_suppressed[note][0] = !note_suppressed[note][0];
                         std::cout << "Note " << note << " global suppression: "
                                   << (note_suppressed[note][0] ? "ON" : "OFF") << std::endl;
-                    } else if (program >= 0 && program < 4) {
+                    } else if (program >= 0 && program < RSX_MAX_PROGRAMS) {
                         // Per-program suppression
                         note_suppressed[note][program + 1] = !note_suppressed[note][program + 1];
                         std::cout << "Note " << note << " suppression for program " << (program + 1) << ": "
@@ -826,7 +858,7 @@ void handle_input_event(InputEvent* event) {
         case ACTION_PROGRAM_MUTE_TOGGLE: {
             if (event->value > 63) {
                 int program = event->parameter;
-                if (program >= 0 && program < 4 && rsx) {
+                if (program >= 0 && program < RSX_MAX_PROGRAMS && rsx) {
                     mixer.program_mutes[program] = !mixer.program_mutes[program];
                     std::cout << "Program " << (program + 1) << " mute: "
                               << (mixer.program_mutes[program] ? "ON" : "OFF") << std::endl;
@@ -1034,7 +1066,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                             if (sequence_manager) {
-                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                                medness_performance_set_tempo(sequence_manager, active_bpm);
                             }
                             std::cout << "  -> active_bpm/tempo_bpm updated to " << active_bpm << std::endl;
                         }
@@ -1246,7 +1278,7 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
 
         // Check if note is suppressed (global or for target program)
         bool is_suppressed = note_suppressed[data1][0] ||  // Global suppression
-                            (target_prog >= 0 && target_prog < 4 && note_suppressed[data1][target_prog + 1]);  // Per-program
+                            (target_prog >= 0 && target_prog < RSX_MAX_PROGRAMS && note_suppressed[data1][target_prog + 1]);  // Per-program
 
         if (is_suppressed) {
             std::cout << "Note " << (int)data1 << " suppressed for program " << (target_prog + 1) << std::endl;
@@ -1408,7 +1440,7 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
 
         // Update sequence manager (for multi-phrase sequences)
         if (sequence_manager) {
-            midi_sequence_manager_update_samples(sequence_manager, frames, 44100, current_pulse);
+            medness_performance_update_samples(sequence_manager, frames, 44100, current_pulse);
         }
     }
 
@@ -1542,10 +1574,14 @@ static const bool DEBUG_MIDI_EVENTS = false;
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
 
-    // Get pad index from userdata to determine which program to use
-    int pad_index = userdata ? *((int*)userdata) : -1;
+    // Userdata can be:
+    // - PadCallbackContext* (for pad MIDI file player) - use helper to detect
+    // - int* pointing to program number (for sequences)
+    bool is_pad = midi_file_is_pad_context(userdata);
+    int pad_index = is_pad ? midi_file_get_pad_index(userdata) : -1;
+    int userdata_value = !is_pad && userdata ? *((int*)userdata) : -1;
 
-    // Trigger visual feedback on note ON events
+    // Trigger visual feedback on note ON events for pads
     if (on && pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
         note_pad_fade[pad_index] = 1.0f;  // Trigger white/bright blink on each note
     }
@@ -1554,20 +1590,26 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     if (DEBUG_MIDI_EVENTS) {
         auto now = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::cout << "[" << ms << "] NOTE pad=" << (pad_index + 1)
+        std::cout << "[" << ms << "] NOTE " << (is_pad ? "pad=" : "seq prog=")
+                  << (is_pad ? (pad_index + 1) : (userdata_value + 1))
                   << " note=" << note << " vel=" << velocity << " " << (on ? "ON" : "OFF") << std::endl;
     }
 
-    // Determine target program based on pad configuration
+    // Determine target program
     int target_program = current_program;
     int pad_velocity = 100;  // Default velocity
-    if (rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
+
+    if (is_pad && rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
+        // Pad MIDI file - get program from pad configuration
         NoteTriggerPad* pad = &rsx->pads[pad_index];
         if (pad->program >= 0 && pad->program < rsx->num_programs) {
             target_program = pad->program;
         }
         // Get pad's configured velocity
         pad_velocity = pad->velocity > 0 ? pad->velocity : 100;
+    } else if (!is_pad && userdata_value >= 0 && userdata_value < RSX_MAX_PROGRAMS) {
+        // Sequence - userdata IS the program number
+        target_program = userdata_value;
     }
 
     // Scale MIDI file velocity by pad's configured velocity
@@ -1862,11 +1904,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Initialize MIDI sequence manager (for multi-phrase sequences)
-    sequence_manager = midi_sequence_manager_create();
+    sequence_manager = medness_performance_create();
     if (sequence_manager) {
-        midi_sequence_manager_set_midi_callback(sequence_manager, midi_file_event_callback, nullptr);
-        midi_sequence_manager_set_tempo(sequence_manager, 125.0f);  // Default BPM
-        midi_sequence_manager_set_start_mode(sequence_manager, SEQUENCE_START_QUANTIZED);  // Wait for row 0
+        // Set the sequencer reference - sequences use the same sequencer as pads!
+        medness_performance_set_sequencer(sequence_manager, sequencer);
+
+        medness_performance_set_midi_callback(sequence_manager, midi_file_event_callback, nullptr);
+        medness_performance_set_tempo(sequence_manager, 125.0f);  // Default BPM
+        medness_performance_set_start_mode(sequence_manager, SEQUENCE_START_QUANTIZED);  // Wait for row 0
         midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
 
         // Load sequences if RSX file was already loaded
@@ -2196,6 +2241,26 @@ int main(int argc, char* argv[]) {
                 note_pad_loop_fade[i] -= 0.02f;  // Slower fade for loop events
                 if (note_pad_loop_fade[i] < 0.0f) note_pad_loop_fade[i] = 0.0f;
             }
+
+            // Update sequence pad states and blink timers
+            if (rsx && i < rsx->num_pads && rsx->pads[i].sequence_index >= 0) {
+                int seq_idx = rsx->pads[i].sequence_index;
+                bool is_playing = sequence_manager && medness_performance_is_playing(sequence_manager, seq_idx);
+
+                if (is_playing) {
+                    sequence_pad_states[i] = SEQ_PAD_PLAYING;
+                    // Blink timer for playing sequences (sine wave for smooth pulsing)
+                    sequence_pad_blink[i] += 0.1f;
+                    if (sequence_pad_blink[i] > 6.28f) sequence_pad_blink[i] = 0.0f;  // 2*PI
+                } else {
+                    // TODO: Detect queued state (would need queue info from sequence manager)
+                    sequence_pad_states[i] = SEQ_PAD_IDLE;
+                    sequence_pad_blink[i] = 0.0f;
+                }
+            } else {
+                sequence_pad_states[i] = SEQ_PAD_IDLE;
+                sequence_pad_blink[i] = 0.0f;
+            }
         }
 
         // Update step sequencer fade and highlight current position
@@ -2510,12 +2575,12 @@ int main(int argc, char* argv[]) {
                 const float PROG_BUTTON_SIZE = 48.0f;
                 ImGui::Spacing();
 
-                // P- button (disabled if at first program)
+                // P- button (grayed out if at first program)
                 bool at_first = (current_program == 0);
                 if (at_first) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, COLOR_BUTTON_AT_LIMIT);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COLOR_BUTTON_AT_LIMIT);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, COLOR_BUTTON_AT_LIMIT);
                 }
                 if (ImGui::Button("P-", ImVec2(PROG_BUTTON_SIZE, PROG_BUTTON_SIZE)) && !at_first) {
                     if (learn_mode_active) {
@@ -2531,7 +2596,7 @@ int main(int argc, char* argv[]) {
                 ImGui::SameLine();
 
                 // P1 button (force program 1)
-                ImVec4 p1Col = (current_program == 0) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                ImVec4 p1Col = (current_program == 0) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                 ImGui::PushStyleColor(ImGuiCol_Button, p1Col);
                 if (ImGui::Button("P1", ImVec2(PROG_BUTTON_SIZE, PROG_BUTTON_SIZE))) {
                     switch_program(0);
@@ -2539,12 +2604,12 @@ int main(int argc, char* argv[]) {
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
 
-                // P+ button (disabled if at last program)
+                // P+ button (grayed out if at last program)
                 bool at_last = (current_program == rsx->num_programs - 1);
                 if (at_last) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, COLOR_BUTTON_AT_LIMIT);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COLOR_BUTTON_AT_LIMIT);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, COLOR_BUTTON_AT_LIMIT);
                 }
                 if (ImGui::Button("P+", ImVec2(PROG_BUTTON_SIZE, PROG_BUTTON_SIZE)) && !at_last) {
                     if (learn_mode_active) {
@@ -2564,7 +2629,7 @@ int main(int argc, char* argv[]) {
             // Mode selection buttons
 
             // Switch to master effects settings
-            ImVec4 fxmCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_MASTER) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 fxmCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_MASTER) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, fxmCol);
             if (ImGui::Button("FXM", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_EFFECTS;
@@ -2574,7 +2639,7 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
 
             // Switch to Program effects settings
-            ImVec4 fxpCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_PROGRAM) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 fxpCol = (ui_mode == UI_MODE_EFFECTS && fx_mode == FX_MODE_PROGRAM) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, fxpCol);
             if (ImGui::Button("FXP", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_EFFECTS;
@@ -2584,15 +2649,16 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
 
             // Switch to mixer panel
-            ImVec4 mixCol = (ui_mode == UI_MODE_MIX) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 mixCol = (ui_mode == UI_MODE_MIX) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, mixCol);
             if (ImGui::Button("MIX", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_MIX;
             }
             ImGui::PopStyleColor();
 
-            // Sample crate (file) settings
-            ImVec4 crateCol = (ui_mode == UI_MODE_INSTRUMENT) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            // ROW 1: Performance/playback related
+            // Sample crate (file) settings - high-level program list
+            ImVec4 crateCol = (ui_mode == UI_MODE_INSTRUMENT) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, crateCol);
             if (ImGui::Button("CRATE", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_INSTRUMENT;
@@ -2600,37 +2666,48 @@ int main(int argc, char* argv[]) {
             ImGui::PopStyleColor();
             ImGui::SameLine();
 
+            // Program editor - detailed single program view
+            ImVec4 progCol = (ui_mode == UI_MODE_PROGRAM) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
+            ImGui::PushStyleColor(ImGuiCol_Button, progCol);
+            if (ImGui::Button("PROG", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
+                ui_mode = UI_MODE_PROGRAM;
+            }
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
             // Note play buttons
-            ImVec4 padsCol = (ui_mode == UI_MODE_PADS) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 padsCol = (ui_mode == UI_MODE_PADS) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, padsCol);
             if (ImGui::Button("PADS", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_PADS;
             }
             ImGui::PopStyleColor();
-            ImGui::SameLine();
 
+            ImGui::Dummy(ImVec2(0, 8.0f));
+
+            // ROW 2: View modes
             // Track view button
-            ImVec4 trackCol = (ui_mode == UI_MODE_TRACK) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 trackCol = (ui_mode == UI_MODE_TRACK) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, trackCol);
             if (ImGui::Button("TRACK", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_TRACK;
             }
             ImGui::PopStyleColor();
+            ImGui::SameLine();
 
-            ImGui::Dummy(ImVec2(0, 16.0f));
-
-            // Additional mode buttons (second row)
             // Sequences view button
-            ImVec4 seqCol = (ui_mode == UI_MODE_SEQUENCES) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 seqCol = (ui_mode == UI_MODE_SEQUENCES) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, seqCol);
             if (ImGui::Button("SEQ", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_SEQUENCES;
             }
             ImGui::PopStyleColor();
-            ImGui::SameLine();
 
+            ImGui::Dummy(ImVec2(0, 8.0f));
+
+            // ROW 3: Configuration/settings
             // LEARN button
-            ImVec4 learnCol = learn_mode_active ? ImVec4(0.90f, 0.15f, 0.18f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 learnCol = learn_mode_active ? COLOR_LEARN_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, learnCol);
             if (ImGui::Button("LEARN", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 learn_mode_active = !learn_mode_active;
@@ -2643,7 +2720,7 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
 
             // MIDI setup
-            ImVec4 midiCol = (ui_mode == UI_MODE_MIDI) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 midiCol = (ui_mode == UI_MODE_MIDI) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, midiCol);
             if (ImGui::Button("MIDI", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_MIDI;
@@ -2652,7 +2729,7 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
 
             // Application  settings
-            ImVec4 settingsCol = (ui_mode == UI_MODE_SETTINGS) ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+            ImVec4 settingsCol = (ui_mode == UI_MODE_SETTINGS) ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
             ImGui::PushStyleColor(ImGuiCol_Button, settingsCol);
             if (ImGui::Button("SETUP", ImVec2(BUTTON_SIZE, BUTTON_SIZE))) {
                 ui_mode = UI_MODE_SETTINGS;
@@ -3019,9 +3096,9 @@ int main(int argc, char* argv[]) {
                             bool is_configured = (rsx->pads[pad_idx].enabled &&
                                                  (rsx->pads[pad_idx].note >= 0 || rsx->pads[pad_idx].midi_file[0] != '\0'));
 
-                            ImVec4 btn_col = is_selected ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) :
-                                            (is_configured ? ImVec4(0.26f, 0.27f, 0.30f, 1.0f) :
-                                                            ImVec4(0.16f, 0.17f, 0.18f, 1.0f));
+                            ImVec4 btn_col = is_selected ? COLOR_BUTTON_ACTIVE :
+                                            (is_configured ? COLOR_BUTTON_INACTIVE :
+                                                            COLOR_BUTTON_AT_LIMIT);
 
                             ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
                             char btn_label[8];
@@ -3109,33 +3186,94 @@ int main(int argc, char* argv[]) {
                     ImGui::Separator();
                     ImGui::Spacing();
                     ImGui::Text("MIDI File Playback (optional):");
-                    ImGui::TextWrapped("Leave empty to trigger a single note. Set a MIDI file path to play that file when pad is triggered.");
+                    ImGui::TextWrapped("Leave empty to trigger a single note. Select a MIDI file to play when pad is triggered.");
 
-                    // Use InputText with EnterReturnsTrue flag to only load on Enter or focus lost
-                    if (ImGui::InputText("MIDI File Path", pad->midi_file, sizeof(pad->midi_file), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                        rsx_changed = true;
+                    // Build list of available MIDI files
+                    static std::vector<std::string> pad_midi_files;
+                    static bool pad_midi_files_loaded = false;
+                    if (!pad_midi_files_loaded && !rsx_file_path.empty()) {
+                        pad_midi_files.clear();
+                        pad_midi_files.push_back("(none)");  // Option to clear
 
-                        // Load MIDI file only when Enter is pressed or focus is lost
-                        if (midi_pad_player && pad->midi_file[0] != '\0') {
-                            // Enable the pad when MIDI file is set
-                            if (!pad->enabled) {
-                                pad->enabled = 1;
-                                std::cout << "Auto-enabled pad " << (selected_pad + 1) << " for MIDI file playback" << std::endl;
+                        if (file_list) {
+                            // Use file_list if available
+                            for (int f = 0; f < file_list->count; f++) {
+                                const char* name = file_list->filenames[f];
+                                size_t len = strlen(name);
+                                if (len > 4 && (strcmp(name + len - 4, ".mid") == 0 || strcmp(name + len - 4, ".MID") == 0)) {
+                                    pad_midi_files.push_back(std::string(name));
+                                }
                             }
+                        } else {
+                            // Scan RSX directory for MIDI files
+                            char rsx_dir[512];
+                            strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
+                            rsx_dir[sizeof(rsx_dir) - 1] = '\0';
+                            char* dir_path = dirname(rsx_dir);
 
-                            // Get full path relative to RSX file
-                            char midi_path[512];
-                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
-
-                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
-                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
-                            } else {
-                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                            DIR* dir = opendir(dir_path);
+                            if (dir) {
+                                struct dirent* entry;
+                                while ((entry = readdir(dir)) != nullptr) {
+                                    size_t len = strlen(entry->d_name);
+                                    if (len > 4 && (strcmp(entry->d_name + len - 4, ".mid") == 0 ||
+                                                   strcmp(entry->d_name + len - 4, ".MID") == 0)) {
+                                        pad_midi_files.push_back(std::string(entry->d_name));
+                                    }
+                                }
+                                closedir(dir);
                             }
                         }
+                        std::sort(pad_midi_files.begin() + 1, pad_midi_files.end());  // Sort all except "(none)"
+                        pad_midi_files_loaded = true;
                     }
-                    // Mark RSX as changed if text was deactivated (focus lost)
-                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+
+                    // MIDI file dropdown
+                    const char* current_display = (pad->midi_file[0] == '\0') ? "(none)" : pad->midi_file;
+                    if (ImGui::BeginCombo("MIDI File", current_display)) {
+                        for (size_t idx = 0; idx < pad_midi_files.size(); idx++) {
+                            bool is_selected = (strcmp(pad_midi_files[idx].c_str(), current_display) == 0);
+                            if (ImGui::Selectable(pad_midi_files[idx].c_str(), is_selected)) {
+                                // Selection changed
+                                if (idx == 0) {
+                                    // "(none)" selected - clear MIDI file
+                                    pad->midi_file[0] = '\0';
+                                } else {
+                                    strncpy(pad->midi_file, pad_midi_files[idx].c_str(), sizeof(pad->midi_file) - 1);
+                                    pad->midi_file[sizeof(pad->midi_file) - 1] = '\0';
+
+                                    // Enable the pad when MIDI file is set
+                                    if (!pad->enabled) {
+                                        pad->enabled = 1;
+                                        std::cout << "Auto-enabled pad " << (selected_pad + 1) << " for MIDI file playback" << std::endl;
+                                    }
+
+                                    // Get full path relative to RSX file
+                                    char midi_path[512];
+                                    samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
+
+                                    if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                        std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
+                                    } else {
+                                        std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
+                                    }
+                                }
+                                rsx_changed = true;
+                            }
+                            if (is_selected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    // Refresh button to rescan MIDI files
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Refresh")) {
+                        pad_midi_files_loaded = false;  // Force rescan on next frame
+                    }
+
+                    if (false) {  // Dummy condition to satisfy following code structure
                         rsx_changed = true;
 
                         // Also load on focus lost
@@ -3251,7 +3389,7 @@ int main(int argc, char* argv[]) {
                             // Color: Red if suppressed, gray if not
                             ImVec4 btn_col = note_suppressed[note][0] ?
                                 ImVec4(0.80f, 0.20f, 0.20f, 1.0f) :
-                                ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                                COLOR_BUTTON_INACTIVE;
 
                             ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
                             if (ImGui::Button(btn_label, ImVec2(32, 24))) {
@@ -3292,8 +3430,8 @@ int main(int argc, char* argv[]) {
                             }
 
                             ImVec4 prog_col = (supp_program_view == i) ?
-                                ImVec4(0.70f, 0.60f, 0.20f, 1.0f) :
-                                ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                                COLOR_BUTTON_ACTIVE :
+                                COLOR_BUTTON_INACTIVE;
 
                             ImGui::PushStyleColor(ImGuiCol_Button, prog_col);
                             if (ImGui::Button(prog_btn, ImVec2(80, 30))) {
@@ -3324,7 +3462,7 @@ int main(int argc, char* argv[]) {
                                 // Color: Red if suppressed, gray if not
                                 ImVec4 btn_col = note_suppressed[note][supp_program_view + 1] ?
                                     ImVec4(0.80f, 0.20f, 0.20f, 1.0f) :
-                                    ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                                    COLOR_BUTTON_INACTIVE;
 
                                 ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
                                 if (ImGui::Button(btn_label, ImVec2(32, 24))) {
@@ -3345,6 +3483,293 @@ int main(int argc, char* argv[]) {
                     // Auto-save if suppression changed
                     if (suppression_changed) {
                         save_note_suppression_to_rsx();
+                    }
+                }
+            }
+            else if (ui_mode == UI_MODE_PROGRAM) {
+                // PROG MODE: Detailed single program editor
+                ImGui::Text("PROGRAM CONFIGURATION");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (!rsx) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f), "No .rsx file loaded");
+                    ImGui::Text("Load a .rsx file to configure programs");
+                } else {
+                    // PROG panel follows current_program by default
+                    // Use current_program directly instead of selected_program_for_edit
+                    int prog_idx = current_program;
+
+                    // Program selector dropdown - shows current program, allows quick switching
+                    ImGui::Text("Program:");
+                    ImGui::SameLine(80);
+                    ImGui::PushItemWidth(300);
+
+                    // Build list of programs for dropdown (only show loaded programs)
+                    std::vector<std::string> program_names;
+                    std::vector<int> program_indices;
+                    for (int i = 0; i < rsx->num_programs; i++) {
+                        char label[256];
+                        if (strlen(rsx->program_names[i]) > 0) {
+                            snprintf(label, sizeof(label), "%d: %s", i + 1, rsx->program_names[i]);
+                        } else {
+                            snprintf(label, sizeof(label), "%d: Program %d", i + 1, i + 1);
+                        }
+                        program_names.push_back(label);
+                        program_indices.push_back(i);
+                    }
+
+                    // Find current program in the list
+                    int current_selection = -1;
+                    for (size_t i = 0; i < program_indices.size(); i++) {
+                        if (program_indices[i] == current_program) {
+                            current_selection = i;
+                            break;
+                        }
+                    }
+                    if (current_selection == -1 && !program_indices.empty()) {
+                        // Current program not in list, shouldn't happen but default to first
+                        current_selection = 0;
+                    }
+
+                    if (!program_indices.empty() && current_selection >= 0) {
+                        if (ImGui::BeginCombo("##prog_selector", program_names[current_selection].c_str())) {
+                            for (size_t i = 0; i < program_names.size(); i++) {
+                                bool is_selected = (current_selection == (int)i);
+                                if (ImGui::Selectable(program_names[i].c_str(), is_selected)) {
+                                    // Switch to selected program (updates current_program)
+                                    current_program = program_indices[i];
+                                    // Also switch the active synth
+                                    if (current_program >= 0 && current_program < RSX_MAX_PROGRAMS) {
+                                        synth = program_synths[current_program];
+                                    }
+                                }
+                                if (is_selected) {
+                                    ImGui::SetItemDefaultFocus();
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        ImGui::PopItemWidth();
+
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        // Show program details for current_program
+                        if (prog_idx >= 0 && prog_idx < rsx->num_programs) {
+
+                            // GENERAL section
+                            ImGui::Text("GENERAL:");
+                            ImGui::Spacing();
+
+                            // Name
+                            ImGui::Text("Name:");
+                            ImGui::SameLine(120);
+                            ImGui::PushItemWidth(300);
+                            if (ImGui::InputText("##prog_name", rsx->program_names[prog_idx], sizeof(rsx->program_names[prog_idx]))) {
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
+                            ImGui::PopItemWidth();
+
+                            // Mode indicator
+                            ImGui::Text("Mode:");
+                            ImGui::SameLine(120);
+                            if (rsx->program_modes[prog_idx] == PROGRAM_MODE_SAMPLES) {
+                                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Samples");
+                            } else {
+                                ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.9f, 1.0f), "SFZ File");
+                            }
+
+                            // Volume
+                            ImGui::Text("Volume:");
+                            ImGui::SameLine(120);
+                            ImGui::PushItemWidth(200);
+                            if (ImGui::SliderFloat("##prog_volume", &rsx->program_volumes[prog_idx], 0.0f, 1.0f, "%.2f")) {
+                                mixer.program_volumes[prog_idx] = rsx->program_volumes[prog_idx];
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
+                            ImGui::PopItemWidth();
+
+                            // Pan
+                            ImGui::Text("Pan:");
+                            ImGui::SameLine(120);
+                            ImGui::PushItemWidth(200);
+                            if (ImGui::SliderFloat("##prog_pan", &rsx->program_pans[prog_idx], 0.0f, 1.0f, "%.2f")) {
+                                mixer.program_pans[prog_idx] = rsx->program_pans[prog_idx];
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
+                            ImGui::PopItemWidth();
+
+                            // Mute
+                            ImGui::Text("Mute:");
+                            ImGui::SameLine(120);
+                            bool is_muted = (mixer.program_mutes[prog_idx] != 0);
+                            if (ImGui::Checkbox("##prog_mute", &is_muted)) {
+                                mixer.program_mutes[prog_idx] = is_muted ? 1 : 0;
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            // SOURCE section
+                            ImGui::Text("SOURCE:");
+                            ImGui::Spacing();
+
+                            if (rsx->program_modes[prog_idx] == PROGRAM_MODE_SFZ_FILE) {
+                                // SFZ File mode
+                                ImGui::Text("SFZ File:");
+                                ImGui::SameLine(120);
+                                ImGui::PushItemWidth(400);
+                                if (ImGui::InputText("##prog_sfz_file", rsx->program_files[prog_idx], sizeof(rsx->program_files[prog_idx]))) {
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    reload_program(prog_idx);
+                                }
+                                ImGui::PopItemWidth();
+
+                                // TODO: Add region count display (query from sfizz)
+                                ImGui::Text("Regions:");
+                                ImGui::SameLine(120);
+                                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(query sfizz)");
+
+                                if (ImGui::Button("Reload SFZ")) {
+                                    reload_program(prog_idx);
+                                }
+                            } else {
+                                // Samples mode
+                                ImGui::Text("Samples:");
+                                ImGui::SameLine(120);
+                                ImGui::Text("%d / %d", rsx->program_sample_counts[prog_idx], RSX_MAX_SAMPLES_PER_PROGRAM);
+
+                                ImGui::Text("(Sample editor - see CRATE panel)");
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            // NOTE SUPPRESSION section (per-program)
+                            ImGui::Text("NOTE SUPPRESSION (this program only):");
+                            ImGui::Spacing();
+                            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Click note to toggle suppression");
+                            ImGui::Spacing();
+
+                            bool prog_suppression_changed = false;
+
+                            // Show notes in a compact grid (12 notes per row × 11 octaves = 132 notes)
+                            const char* note_names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+
+                            for (int octave = 0; octave < 11; octave++) {
+                                ImGui::Text("Oct %d:", octave);
+                                ImGui::SameLine(60);
+
+                                for (int n = 0; n < 12; n++) {
+                                    int note = octave * 12 + n;
+                                    if (note >= 128) break;
+
+                                    char btn_label[16];
+                                    snprintf(btn_label, sizeof(btn_label), "%s##p%d_n%d", note_names[n], prog_idx, note);
+
+                                    // Color: Red if suppressed, gray if not
+                                    ImVec4 btn_col = note_suppressed[note][prog_idx + 1] ?
+                                        ImVec4(0.80f, 0.20f, 0.20f, 1.0f) :
+                                        COLOR_BUTTON_INACTIVE;
+
+                                    ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
+                                    if (ImGui::Button(btn_label, ImVec2(28, 22))) {
+                                        note_suppressed[note][prog_idx + 1] = !note_suppressed[note][prog_idx + 1];
+                                        prog_suppression_changed = true;
+                                    }
+                                    ImGui::PopStyleColor();
+
+                                    if (ImGui::IsItemHovered()) {
+                                        ImGui::SetTooltip("Note %d (%s%d): %s", note, note_names[n], octave,
+                                            note_suppressed[note][prog_idx + 1] ? "SUPPRESSED" : "Enabled");
+                                    }
+
+                                    if (n < 11) ImGui::SameLine();
+                                }
+                            }
+
+                            if (prog_suppression_changed) {
+                                save_note_suppression_to_rsx();
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            // EFFECTS section
+                            ImGui::Text("EFFECTS:");
+                            ImGui::Spacing();
+                            ImGui::Text("FX Chain Enable:");
+                            ImGui::SameLine(120);
+                            bool fx_enabled = (mixer.program_fx_enable[prog_idx] != 0);
+                            if (ImGui::Checkbox("##prog_fx_enable", &fx_enabled)) {
+                                mixer.program_fx_enable[prog_idx] = fx_enabled ? 1 : 0;
+                            }
+
+                            if (ImGui::Button("Open Effects Editor (FXP)")) {
+                                ui_mode = UI_MODE_EFFECTS;
+                                fx_mode = FX_MODE_PROGRAM;
+                                current_program = prog_idx;  // Switch to this program in FXP view
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            // ACTIONS
+                            if (ImGui::Button("Reload Program")) {
+                                reload_program(prog_idx);
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Delete Program")) {
+                                // TODO: Implement program deletion
+                                ImGui::OpenPopup("Delete Program?");
+                            }
+
+                            if (ImGui::BeginPopupModal("Delete Program?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+                                ImGui::Text("Are you sure you want to delete this program?");
+                                ImGui::Spacing();
+                                if (ImGui::Button("Yes, Delete", ImVec2(120, 0))) {
+                                    // Delete program (shift down)
+                                    for (int j = prog_idx; j < rsx->num_programs - 1; j++) {
+                                        strcpy(rsx->program_files[j], rsx->program_files[j + 1]);
+                                        strcpy(rsx->program_names[j], rsx->program_names[j + 1]);
+                                        rsx->program_volumes[j] = rsx->program_volumes[j + 1];
+                                        rsx->program_pans[j] = rsx->program_pans[j + 1];
+                                    }
+                                    rsx->num_programs--;
+                                    if (!rsx_file_path.empty()) {
+                                        samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                    }
+                                    // Adjust current_program if it was deleted or is now out of range
+                                    if (current_program >= rsx->num_programs && rsx->num_programs > 0) {
+                                        current_program = rsx->num_programs - 1;
+                                        synth = program_synths[current_program];
+                                    }
+                                    ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                                    ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::EndPopup();
+                            }
+                        }
+                    } else {
+                        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.0f), "No programs loaded");
+                        ImGui::Text("Add programs in CRATE panel");
                     }
                 }
             }
@@ -3390,7 +3815,7 @@ int main(int argc, char* argv[]) {
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                             if (sequence_manager) {
-                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                                medness_performance_set_tempo(sequence_manager, active_bpm);
                             }
                         } else if (is_external_clock) {
                             // Revert to MIDI clock BPM if user tries to drag during external sync
@@ -3413,7 +3838,7 @@ int main(int argc, char* argv[]) {
                             }
                             midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
                             if (sequence_manager) {
-                                midi_sequence_manager_set_tempo(sequence_manager, active_bpm);
+                                medness_performance_set_tempo(sequence_manager, active_bpm);
                             }
                         }
                     }
@@ -3431,7 +3856,7 @@ int main(int argc, char* argv[]) {
                     ImGui::Dummy(ImVec2(0, 4.0f));
 
                     // Master FX enable toggle
-                    ImVec4 fxCol = mixer.master_fx_enable ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                    ImVec4 fxCol = mixer.master_fx_enable ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                     ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
                     if (ImGui::Button("FX##master_fx", ImVec2(sliderW, SOLO_SIZE))) {
                         mixer.master_fx_enable = !mixer.master_fx_enable;
@@ -3459,7 +3884,7 @@ int main(int argc, char* argv[]) {
                     ImGui::Dummy(ImVec2(0, 8.0f));
 
                     // Mute button
-                    ImVec4 muteCol = mixer.master_mute ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                    ImVec4 muteCol = mixer.master_mute ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : COLOR_BUTTON_INACTIVE;
                     ImGui::PushStyleColor(ImGuiCol_Button, muteCol);
                     if (ImGui::Button("M##master_mute", ImVec2(sliderW, MUTE_SIZE))) {
                         mixer.master_mute = !mixer.master_mute;
@@ -3490,7 +3915,7 @@ int main(int argc, char* argv[]) {
                         // Per-program FX enable toggle
                         char fx_id[32];
                         snprintf(fx_id, sizeof(fx_id), "FX##prog%d_fx", i);
-                        ImVec4 fxCol = mixer.program_fx_enable[i] ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 fxCol = mixer.program_fx_enable[i] ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, fxCol);
                         if (ImGui::Button(fx_id, ImVec2(sliderW, SOLO_SIZE))) {
                             mixer.program_fx_enable[i] = !mixer.program_fx_enable[i];
@@ -3532,7 +3957,7 @@ int main(int argc, char* argv[]) {
                         // Mute button
                         char mute_id[32];
                         snprintf(mute_id, sizeof(mute_id), "M##prog%d_mute", i);
-                        ImVec4 muteCol = mixer.program_mutes[i] ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 muteCol = mixer.program_mutes[i] ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, muteCol);
                         if (ImGui::Button(mute_id, ImVec2(sliderW, MUTE_SIZE))) {
                             mixer.program_mutes[i] = !mixer.program_mutes[i];
@@ -3572,7 +3997,7 @@ int main(int argc, char* argv[]) {
                     ImGui::Dummy(ImVec2(0, 8.0f));
 
                     // Mute button
-                    ImVec4 muteCol = mixer.playback_mute ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                    ImVec4 muteCol = mixer.playback_mute ? ImVec4(0.80f, 0.20f, 0.20f, 1.0f) : COLOR_BUTTON_INACTIVE;
                     ImGui::PushStyleColor(ImGuiCol_Button, muteCol);
                     if (ImGui::Button("M##playback_mute", ImVec2(sliderW, MUTE_SIZE))) {
                         mixer.playback_mute = !mixer.playback_mute;
@@ -3633,7 +4058,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
                         int dist_en = regroove_effects_get_distortion_enabled(effects);
-                        ImVec4 enCol = dist_en ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 enCol = dist_en ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, enCol);
                         if (ImGui::Button("E##dist_en", ImVec2(sliderW, SOLO_SIZE))) {
                             if (learn_mode_active) {
@@ -3717,7 +4142,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
                         int filt_en = regroove_effects_get_filter_enabled(effects);
-                        ImVec4 enCol = filt_en ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 enCol = filt_en ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, enCol);
                         if (ImGui::Button("E##filt_en", ImVec2(sliderW, SOLO_SIZE))) {
                             if (learn_mode_active) {
@@ -3799,7 +4224,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
                         int eq_en = regroove_effects_get_eq_enabled(effects);
-                        ImVec4 enCol = eq_en ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 enCol = eq_en ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, enCol);
                         if (ImGui::Button("E##eq_en", ImVec2(sliderW, SOLO_SIZE))) {
                             if (learn_mode_active) {
@@ -3913,7 +4338,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
                         int comp_en = regroove_effects_get_compressor_enabled(effects);
-                        ImVec4 enCol = comp_en ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 enCol = comp_en ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, enCol);
                         if (ImGui::Button("E##comp_en", ImVec2(sliderW, SOLO_SIZE))) {
                             if (learn_mode_active) {
@@ -3995,7 +4420,7 @@ int main(int argc, char* argv[]) {
                         ImGui::Dummy(ImVec2(0, 4.0f));
 
                         int delay_en = regroove_effects_get_delay_enabled(effects);
-                        ImVec4 enCol = delay_en ? ImVec4(0.70f, 0.60f, 0.20f, 1.0f) : ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                        ImVec4 enCol = delay_en ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
                         ImGui::PushStyleColor(ImGuiCol_Button, enCol);
                         if (ImGui::Button("E##delay_en", ImVec2(sliderW, SOLO_SIZE))) {
                             if (learn_mode_active) {
@@ -4183,7 +4608,38 @@ int main(int argc, char* argv[]) {
                         float loop_brightness = note_pad_loop_fade[pad_idx];    // Blue/cyan on loop restarts
                         ImVec4 pad_col;
 
-                        if (loop_brightness > 0.0f) {
+                        // Check if this pad has a sequence assigned
+                        bool has_sequence = (pad && pad->sequence_index >= 0);
+                        SequencePadState seq_state = sequence_pad_states[pad_idx];
+
+                        if (has_sequence && seq_state == SEQ_PAD_PLAYING) {
+                            // PLAYING SEQUENCE - RED with blinking
+                            float blink = sinf(sequence_pad_blink[pad_idx]) * 0.5f + 0.5f;  // 0.0-1.0 sine wave
+                            pad_col = ImVec4(
+                                0.5f + blink * 0.4f,  // Red pulses 0.5-0.9
+                                0.1f + blink * 0.1f,  // Slight green for warmth
+                                0.1f + blink * 0.1f,  // Slight blue for warmth
+                                1.0f
+                            );
+                        } else if (has_sequence && seq_state == SEQ_PAD_QUEUED) {
+                            // QUEUED SEQUENCE - BLUE with blinking
+                            float blink = sinf(sequence_pad_blink[pad_idx]) * 0.5f + 0.5f;
+                            pad_col = ImVec4(
+                                0.1f + blink * 0.1f,
+                                0.1f + blink * 0.2f,
+                                0.5f + blink * 0.4f,  // Blue pulses 0.5-0.9
+                                1.0f
+                            );
+                        } else if (has_sequence && seq_state == SEQ_PAD_NEXT_PHRASE) {
+                            // NEXT PHRASE - YELLOW blinking
+                            float blink = sinf(sequence_pad_blink[pad_idx]) * 0.5f + 0.5f;
+                            pad_col = ImVec4(
+                                0.6f + blink * 0.3f,  // Yellow pulses
+                                0.6f + blink * 0.3f,
+                                0.1f + blink * 0.1f,
+                                1.0f
+                            );
+                        } else if (loop_brightness > 0.0f) {
                             // Loop restart - blue/cyan blink (like regroove transition fade)
                             pad_col = ImVec4(
                                 0.26f + loop_brightness * 0.15f,
@@ -4201,10 +4657,10 @@ int main(int argc, char* argv[]) {
                             );
                         } else if (!pad_configured) {
                             // Not configured (darker gray)
-                            pad_col = ImVec4(0.16f, 0.17f, 0.18f, 1.0f);
+                            pad_col = COLOR_BUTTON_AT_LIMIT;
                         } else {
                             // Configured but inactive
-                            pad_col = ImVec4(0.26f, 0.27f, 0.30f, 1.0f);
+                            pad_col = COLOR_BUTTON_INACTIVE;
                         }
 
                         ImGui::PushStyleColor(ImGuiCol_Button, pad_col);
@@ -4333,15 +4789,15 @@ int main(int argc, char* argv[]) {
                                 int seq_idx = pad->sequence_index;
                                 int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
 
-                                if (midi_sequence_manager_is_playing(sequence_manager, seq_idx)) {
+                                if (medness_performance_is_playing(sequence_manager, seq_idx)) {
                                     // Already playing - stop it
                                     std::cout << "=== STOPPING SEQUENCE " << (seq_idx + 1) << " from pad " << (pad_idx + 1) << " ===" << std::endl;
-                                    midi_sequence_manager_stop(sequence_manager, seq_idx);
+                                    medness_performance_stop(sequence_manager, seq_idx);
                                     note_pad_fade[pad_idx] = 0.0f;
                                 } else {
                                     // Start sequence
                                     std::cout << "=== TRIGGERING SEQUENCE " << (seq_idx + 1) << " from pad " << (pad_idx + 1) << " ===" << std::endl;
-                                    midi_sequence_manager_play(sequence_manager, seq_idx, current_pulse);
+                                    medness_performance_play(sequence_manager, seq_idx, current_pulse);
                                     note_pad_fade[pad_idx] = 1.5f;  // Bright blink for sequence start
                                 }
                             }
@@ -4675,26 +5131,41 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                if (!sequence_manager) {
+                if (!sequence_manager || !rsx) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Sequence manager not initialized");
                 } else {
-                    int num_sequences = midi_sequence_manager_get_count(sequence_manager);
+                    // Use RSX sequence count (includes empty sequences), not manager count
+                    int num_sequences = rsx->num_sequences;
+
+                    // Button to create new sequence
+                    if (rsx->num_sequences < RSX_MAX_SEQUENCES) {
+                        if (ImGui::Button("+ NEW SEQUENCE", ImVec2(150.0f, 30.0f))) {
+                            // Create a new empty sequence
+                            int new_idx = rsx->num_sequences;
+                            snprintf(rsx->sequences[new_idx].name, sizeof(rsx->sequences[new_idx].name), "Sequence %d", new_idx + 1);
+                            rsx->sequences[new_idx].num_phrases = 0;
+                            rsx->sequences[new_idx].enabled = 1;
+                            rsx->sequences[new_idx].loop = 1;
+                            rsx->num_sequences++;
+                            std::cout << "[SEQ UI] Created new sequence " << (new_idx + 1) << std::endl;
+                        }
+                    }
+
+                    ImGui::Spacing();
 
                     if (num_sequences == 0) {
-                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No sequences loaded in RSX file");
-                        ImGui::Spacing();
-                        ImGui::TextWrapped("Add a [Sequence1] section to your RSX file to define sequences.");
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No sequences. Click '+ NEW SEQUENCE' to create one.");
                     } else {
                         // Start mode selector
                         ImGui::Text("Start Mode:");
                         ImGui::SameLine();
-                        SequenceStartMode current_mode = midi_sequence_manager_get_start_mode(sequence_manager);
+                        SequenceStartMode current_mode = medness_performance_get_start_mode(sequence_manager);
                         const char* mode_names[] = { "Immediate", "Quantized (Row 0)" };
                         int mode_idx = (int)current_mode;
 
                         ImGui::SetNextItemWidth(200.0f);
                         if (ImGui::Combo("##start_mode", &mode_idx, mode_names, 2)) {
-                            midi_sequence_manager_set_start_mode(sequence_manager, (SequenceStartMode)mode_idx);
+                            medness_performance_set_start_mode(sequence_manager, (SequenceStartMode)mode_idx);
                         }
 
                         ImGui::Spacing();
@@ -4710,43 +5181,223 @@ int main(int argc, char* argv[]) {
                         for (int i = 0; i < num_sequences; i++) {
                             ImGui::PushID(i);
 
-                            bool is_playing = midi_sequence_manager_is_playing(sequence_manager, i);
+                            RSXSequence* seq_def = &rsx->sequences[i];
+                            bool has_phrases = (seq_def->num_phrases > 0);
+                            bool is_playing = has_phrases && medness_performance_is_playing(sequence_manager, i);
 
-                            // Sequence number and status
-                            ImGui::Text("Sequence %d", i + 1);
-                            ImGui::SameLine(150.0f);
+                            // Sequence number and name
+                            ImGui::Text("Sequence %d: %s", i + 1, seq_def->name);
+                            ImGui::SameLine(250.0f);
+
+                            // Program assignment
+                            ImGui::SameLine(250.0f);
+                            ImGui::SetNextItemWidth(80.0f);
+                            int prog_display = seq_def->program_number + 1;  // Display as 1-4
+                            if (ImGui::InputInt("##prog", &prog_display)) {
+                                if (prog_display < 1) prog_display = 1;
+                                if (prog_display > 4) prog_display = 4;
+                                seq_def->program_number = prog_display - 1;
+                                // Auto-save when program assignment changes
+                                if (!rsx_file_path.empty()) {
+                                    samplecrate_rsx_save(rsx, rsx_file_path.c_str());
+                                }
+                            }
+                            ImGui::SameLine();
+                            ImGui::Text("Prog");
 
                             // Status indicator
-                            if (is_playing) {
+                            ImGui::SameLine(380.0f);
+                            if (!has_phrases) {
+                                ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.0f, 1.0f), "[EMPTY]");
+                            } else if (is_playing) {
                                 ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "[PLAYING]");
                             } else {
-                                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[STOPPED]");
+                                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[READY]");
                             }
 
                             // Play/Stop button
-                            ImGui::SameLine(300.0f);
+                            ImGui::SameLine(490.0f);
                             if (is_playing) {
                                 if (ImGui::Button("STOP", ImVec2(100.0f, 0.0f))) {
-                                    midi_sequence_manager_stop(sequence_manager, i);
+                                    medness_performance_stop(sequence_manager, i);
+                                }
+                            } else if (has_phrases) {
+                                if (ImGui::Button("PLAY", ImVec2(100.0f, 0.0f))) {
+                                    // UI test button - start immediately, don't queue
+                                    SequenceStartMode prev_mode = medness_performance_get_start_mode(sequence_manager);
+                                    medness_performance_set_start_mode(sequence_manager, SEQUENCE_START_IMMEDIATE);
+                                    medness_performance_play(sequence_manager, i, current_pulse);
+                                    medness_performance_set_start_mode(sequence_manager, prev_mode);
                                 }
                             } else {
-                                if (ImGui::Button("PLAY", ImVec2(100.0f, 0.0f))) {
-                                    midi_sequence_manager_play(sequence_manager, i, current_pulse);
-                                }
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                                ImGui::Button("PLAY", ImVec2(100.0f, 0.0f));
+                                ImGui::PopStyleColor(2);
                             }
 
                             // Show current phrase info if playing
                             if (is_playing) {
-                                MidiSequencePlayer* player = midi_sequence_manager_get_player(sequence_manager, i);
+                                MednessSequence* player = medness_performance_get_player(sequence_manager, i);
                                 if (player) {
-                                    int phrase_idx = midi_sequence_player_get_current_phrase(player);
-                                    int phrase_loop = midi_sequence_player_get_current_phrase_loop(player);
-                                    int phrase_count = midi_sequence_player_get_phrase_count(player);
+                                    int phrase_idx = medness_sequence_get_current_phrase(player);
+                                    int phrase_loop = medness_sequence_get_current_phrase_loop(player);
+                                    int phrase_count = medness_sequence_get_phrase_count(player);
 
                                     ImGui::SameLine();
                                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.3f, 1.0f),
                                                       "Phrase %d/%d (loop %d)",
                                                       phrase_idx + 1, phrase_count, phrase_loop);
+                                }
+                            }
+
+                            // Show which pads are assigned to this sequence
+                            ImGui::Text("  Assigned pads: ");
+                            ImGui::SameLine();
+                            bool found_any = false;
+                            for (int p = 0; p < rsx->num_pads; p++) {
+                                if (rsx->pads[p].sequence_index == i) {
+                                    if (found_any) ImGui::SameLine();
+                                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "N%d", p + 1);
+                                    found_any = true;
+                                }
+                            }
+                            if (!found_any) {
+                                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "None");
+                            }
+
+                            // Phrase list and management
+                            ImGui::Spacing();
+                            ImGui::Text("  Phrases (%d):", seq_def->num_phrases);
+
+                            // Show existing phrases with move up/down/delete
+                            for (int p = 0; p < seq_def->num_phrases; p++) {
+                                ImGui::PushID(1000 + p);
+                                RSXPhrase* phrase = &seq_def->phrases[p];
+
+                                ImGui::Text("    %d.", p + 1);
+                                ImGui::SameLine();
+                                ImGui::Text("%s (loops: %d)", phrase->midi_file, phrase->loop_count);
+
+                                // Move up button
+                                if (p > 0) {
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("^")) {
+                                        // Swap with previous
+                                        RSXPhrase temp = seq_def->phrases[p];
+                                        seq_def->phrases[p] = seq_def->phrases[p-1];
+                                        seq_def->phrases[p-1] = temp;
+                                        reload_sequences();
+                                    }
+                                }
+
+                                // Move down button
+                                if (p < seq_def->num_phrases - 1) {
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("v")) {
+                                        // Swap with next
+                                        RSXPhrase temp = seq_def->phrases[p];
+                                        seq_def->phrases[p] = seq_def->phrases[p+1];
+                                        seq_def->phrases[p+1] = temp;
+                                        reload_sequences();
+                                    }
+                                }
+
+                                // Delete button
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) {
+                                    // Remove phrase
+                                    for (int j = p; j < seq_def->num_phrases - 1; j++) {
+                                        seq_def->phrases[j] = seq_def->phrases[j+1];
+                                    }
+                                    seq_def->num_phrases--;
+                                    reload_sequences();
+                                }
+
+                                // Loop count adjuster
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(60.0f);
+                                if (ImGui::InputInt("##loops", &phrase->loop_count)) {
+                                    if (phrase->loop_count < 0) phrase->loop_count = 0;
+                                    reload_sequences();
+                                }
+
+                                ImGui::PopID();
+                            }
+
+                            // Add phrase from available MIDI files
+                            if (seq_def->num_phrases < RSX_MAX_PHRASES_PER_SEQUENCE && !rsx_file_path.empty()) {
+                                ImGui::Spacing();
+                                static int selected_file_idx = 0;
+
+                                // Build list of .mid files using the filtered file list function
+                                std::vector<std::string> midi_files;
+
+                                // Get directory from file_list (which knows the RSX directory)
+                                const char* scan_dir = file_list ? file_list->directory : nullptr;
+
+                                if (!scan_dir && !rsx_file_path.empty()) {
+                                    // Fallback: extract directory from RSX path
+                                    static char rsx_dir_buf[512];
+                                    strncpy(rsx_dir_buf, rsx_file_path.c_str(), sizeof(rsx_dir_buf) - 1);
+                                    rsx_dir_buf[sizeof(rsx_dir_buf) - 1] = '\0';
+                                    char* dir = dirname(rsx_dir_buf);
+                                    scan_dir = dir;
+                                }
+
+                                if (scan_dir) {
+                                    // Create temporary file list for MIDI files
+                                    SamplecrateFileList* midi_list = samplecrate_filelist_create();
+                                    if (midi_list) {
+                                        // Load only .mid files
+                                        if (samplecrate_filelist_load_filtered(midi_list, scan_dir, "mid,MID") > 0) {
+                                            for (int f = 0; f < midi_list->count; f++) {
+                                                midi_files.push_back(std::string(midi_list->filenames[f]));
+                                            }
+                                        }
+                                        samplecrate_filelist_destroy(midi_list);
+                                    }
+                                }
+
+                                // Sort alphabetically
+                                std::sort(midi_files.begin(), midi_files.end());
+
+                                if (selected_file_idx >= (int)midi_files.size()) {
+                                    selected_file_idx = 0;
+                                }
+
+                                if (!midi_files.empty()) {
+                                    ImGui::Text("    Add MIDI file:");
+                                    ImGui::SameLine();
+                                    ImGui::SetNextItemWidth(200.0f);
+                                    if (ImGui::BeginCombo("##addmidi", midi_files[selected_file_idx].c_str())) {
+                                        for (size_t idx = 0; idx < midi_files.size(); idx++) {
+                                            bool is_selected = (idx == selected_file_idx);
+                                            if (ImGui::Selectable(midi_files[idx].c_str(), is_selected)) {
+                                                selected_file_idx = idx;
+                                            }
+                                            if (is_selected) {
+                                                ImGui::SetItemDefaultFocus();
+                                            }
+                                        }
+                                        ImGui::EndCombo();
+                                    }
+
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("+ ADD")) {
+                                        RSXPhrase* new_phrase = &seq_def->phrases[seq_def->num_phrases];
+                                        strncpy(new_phrase->midi_file, midi_files[selected_file_idx].c_str(), sizeof(new_phrase->midi_file) - 1);
+                                        new_phrase->midi_file[sizeof(new_phrase->midi_file) - 1] = '\0';
+                                        strncpy(new_phrase->name, midi_files[selected_file_idx].c_str(), sizeof(new_phrase->name) - 1);
+                                        new_phrase->name[sizeof(new_phrase->name) - 1] = '\0';
+                                        new_phrase->loop_count = 1;
+                                        seq_def->num_phrases++;
+                                        reload_sequences();
+                                        std::cout << "[SEQ UI] Added phrase: " << new_phrase->midi_file << std::endl;
+                                    }
+                                } else {
+                                    // No MIDI files found in directory
+                                    ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.0f, 1.0f), "    No .mid files found in RSX directory");
                                 }
                             }
 
@@ -4757,12 +5408,14 @@ int main(int argc, char* argv[]) {
                             ImGui::PopID();
                         }
 
-                        ImGui::EndChild();
-
-                        // Stop All button
+                        // Stop All button (inside scroll area)
+                        ImGui::Spacing();
+                        ImGui::Spacing();
                         if (ImGui::Button("STOP ALL", ImVec2(150.0f, 40.0f))) {
-                            midi_sequence_manager_stop_all(sequence_manager);
+                            medness_performance_stop_all(sequence_manager);
                         }
+
+                        ImGui::EndChild();
                     }
                 }
             }
@@ -5500,7 +6153,7 @@ int main(int argc, char* argv[]) {
         midi_file_pad_player_destroy(midi_pad_player);
     }
     if (sequence_manager) {
-        midi_sequence_manager_destroy(sequence_manager);
+        medness_performance_destroy(sequence_manager);
     }
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);
