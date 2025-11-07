@@ -38,7 +38,6 @@ extern "C" {
 #include "sfz_builder.h"
 #include "medness_sequencer.h"
 #include "midi_file_player.h"
-#include "midi_file_pad_player.h"
 #include "midi_sysex.h"
 #include "medness_performance.h"
 }
@@ -74,8 +73,8 @@ SamplecrateEngine* engine = nullptr;
 #define synth (engine->synth)
 #define program_synths (engine->program_synths)
 #define rsx (engine->rsx)
-#define midi_pad_player (engine->midi_pad_player)
-#define midi_pad_indices (engine->midi_pad_indices)
+#define performance (engine->performance)
+#define pad_program_numbers (engine->pad_program_numbers)
 #define current_program (engine->current_program)
 #define mixer (engine->mixer)
 #define effects_master (engine->effects_master)
@@ -965,11 +964,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                         tempo_bpm = midi_clock.bpm;   // Update UI slider to match
 
                         // Only update sequencer/player if BPM actually changed
-                        if (bpm_changed && midi_pad_player) {
+                        if (bpm_changed && performance) {
                             if (sequencer) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
-                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            medness_performance_set_tempo(performance, active_bpm);
                             if (sequence_manager) {
                                 medness_performance_set_tempo(sequence_manager, active_bpm);
                             }
@@ -1307,21 +1306,7 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     // Update MIDI file playback BEFORE acquiring the lock
     // This runs in the audio thread for perfect timing (no UI blocking!)
     // The MIDI event callbacks will acquire the lock themselves
-    if (midi_pad_player) {
-        // Pass current pulse count for sub-beat precision MIDI clock sync
-        // total_pulse_count gives us 24 ppqn resolution instead of just beat resolution
-        // Convert to "beat number" by dividing: beat = total_pulses / 24
-        // (-1 if no MIDI clock)
-
-        // Debug MIDI clock state once
-        // static bool logged_clock_state = false;
-        // if (!logged_clock_state) {
-        //     std::cout << "=== SAMPLECRATE BUILD v2025-10-31_fix-wrap-duplicates ===" << std::endl;
-        //     std::cout << "AUDIO CALLBACK: midi_clock.active=" << midi_clock.active
-        //               << " total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
-        //     logged_clock_state = true;
-        // }
-
+    if (performance) {
         // Get pattern position from sequencer (single source of truth)
         // Sequencer handles internal timing advancement
         int current_pulse = -1;
@@ -1341,9 +1326,11 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
                 last_debug_pulse = current_pulse;
             }
         }
-        midi_file_pad_player_update_all_samples(midi_pad_player, frames, 44100, current_pulse);
 
-        // Update sequence manager (for multi-phrase sequences)
+        // Update unified performance manager (handles both pads and sequences)
+        medness_performance_update_samples(performance, frames, 44100, current_pulse);
+
+        // Update sequence manager (for multi-phrase sequences triggered via sequence_manager)
         if (sequence_manager) {
             medness_performance_update_samples(sequence_manager, frames, 44100, current_pulse);
         }
@@ -1473,56 +1460,36 @@ void midi_file_loop_callback(void* userdata) {
 }
 
 // Debug flag for MIDI event logging (disable for better performance)
-static const bool DEBUG_MIDI_EVENTS = false;
+static const bool DEBUG_MIDI_EVENTS = true;
 
 // MIDI file player callback - sends note events to the appropriate synth
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
 
-    // Userdata can be:
-    // - PadCallbackContext* (for pad MIDI file player) - use helper to detect
-    // - int* pointing to program number (for sequences)
-    bool is_pad = midi_file_is_pad_context(userdata);
-    int pad_index = is_pad ? midi_file_get_pad_index(userdata) : -1;
-    int userdata_value = !is_pad && userdata ? *((int*)userdata) : -1;
+    // Userdata is now always int* pointing to program number
+    // (both pads and sequences use the unified medness_performance system)
+    int userdata_value = userdata ? *((int*)userdata) : -1;
 
-    // Trigger visual feedback on note ON events for pads
-    if (on && pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
-        note_pad_fade[pad_index] = 1.0f;  // Trigger white/bright blink on each note
-    }
+    // Visual feedback is now handled by the pad trigger code, not the callback
+    // (since we can't distinguish pads from sequences in the callback anymore)
 
     // Optional: Log event timing for debugging sync issues (causes I/O blocking!)
     if (DEBUG_MIDI_EVENTS) {
         auto now = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::cout << "[" << ms << "] NOTE " << (is_pad ? "pad=" : "seq prog=")
-                  << (is_pad ? (pad_index + 1) : (userdata_value + 1))
+        std::cout << "[" << ms << "] NOTE prog=" << (userdata_value + 1)
                   << " note=" << note << " vel=" << velocity << " " << (on ? "ON" : "OFF") << std::endl;
     }
 
-    // Determine target program
+    // Determine target program from userdata
     int target_program = current_program;
-    int pad_velocity = 100;  // Default velocity
-
-    if (is_pad && rsx && pad_index >= 0 && pad_index < rsx->num_pads) {
-        // Pad MIDI file - get program from pad configuration
-        NoteTriggerPad* pad = &rsx->pads[pad_index];
-        if (pad->program >= 0 && pad->program < rsx->num_programs) {
-            target_program = pad->program;
-        }
-        // Get pad's configured velocity
-        pad_velocity = pad->velocity > 0 ? pad->velocity : 100;
-    } else if (!is_pad && userdata_value >= 0 && userdata_value < RSX_MAX_PROGRAMS) {
-        // Sequence - userdata IS the program number
+    if (userdata_value >= 0 && userdata_value < RSX_MAX_PROGRAMS) {
         target_program = userdata_value;
     }
 
-    // Scale MIDI file velocity by pad's configured velocity
-    // Formula: scaled_velocity = (midi_velocity * pad_velocity) / 100
-    // This allows pad velocity to act as a "playback volume" control (0-127)
-    int scaled_velocity = (velocity * pad_velocity) / 100;
-    if (scaled_velocity > 127) scaled_velocity = 127;  // Clamp to MIDI range
-    if (scaled_velocity < 0) scaled_velocity = 0;
+    // Note: velocity scaling for pads is no longer supported in unified system
+    // (velocity is controlled in MIDI file itself)
+    int scaled_velocity = velocity;
 
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];
@@ -1759,13 +1726,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Note: midi_pad_player is now created by the engine, accessed via macro
-    if (midi_pad_player) {
-        midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
-        midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
+    // Note: performance is now created by the engine, accessed via macro
+    // Setup callbacks for the unified performance manager (handles pads and sequences from engine)
+    if (performance) {
+        medness_performance_set_midi_callback(performance, midi_file_event_callback, nullptr);
     }
 
-    // Initialize MIDI sequence manager (for multi-phrase sequences)
+    // Initialize MIDI sequence manager (for multi-phrase sequences triggered via GUI)
     sequence_manager = medness_performance_create();
     if (sequence_manager) {
         // Set the sequencer reference - sequences use the same sequencer as pads!
@@ -1774,7 +1741,6 @@ int main(int argc, char* argv[]) {
         medness_performance_set_midi_callback(sequence_manager, midi_file_event_callback, nullptr);
         medness_performance_set_tempo(sequence_manager, 125.0f);  // Default BPM
         medness_performance_set_start_mode(sequence_manager, SEQUENCE_START_QUANTIZED);  // Wait for row 0
-        midi_file_pad_player_set_tempo(midi_pad_player, 125.0f);  // Default BPM
 
         // Load sequences if RSX file was already loaded
         if (rsx && !rsx_file_path.empty()) {
@@ -2231,8 +2197,8 @@ int main(int argc, char* argv[]) {
                             printf("[File Browser] Loading RSX: %s\n", path);
 
                             // Stop all MIDI playback before reloading
-                            if (midi_pad_player) {
-                                midi_file_pad_player_stop_all(midi_pad_player);
+                            if (performance) {
+                                medness_performance_stop_all(performance);
                             }
                             if (sequence_manager) {
                                 medness_performance_stop_all(sequence_manager);
@@ -2966,10 +2932,9 @@ int main(int argc, char* argv[]) {
                                     char midi_path[512];
                                     samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
 
-                                    if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                                    int prog = (pad->program >= 0) ? pad->program : current_program;
+                                    if (performance && medness_performance_load_pad(performance, selected_pad, midi_path, prog) != 0) {
                                         std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
-                                    } else {
-                                        std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
                                     }
                                 }
                                 rsx_changed = true;
@@ -2991,14 +2956,13 @@ int main(int argc, char* argv[]) {
                         rsx_changed = true;
 
                         // Also load on focus lost
-                        if (midi_pad_player && pad->midi_file[0] != '\0') {
+                        if (performance && pad->midi_file[0] != '\0') {
                             char midi_path[512];
                             samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
 
-                            if (midi_file_pad_player_load(midi_pad_player, selected_pad, midi_path, &midi_pad_indices[selected_pad]) != 0) {
+                            int prog = (pad->program >= 0) ? pad->program : current_program;
+                            if (medness_performance_load_pad(performance, selected_pad, midi_path, prog) != 0) {
                                 std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
-                            } else {
-                                std::cout << "Loaded MIDI file for pad " << (selected_pad + 1) << ": " << midi_path << std::endl;
                             }
                         }
                     }
@@ -3008,8 +2972,8 @@ int main(int argc, char* argv[]) {
                         rsx_changed = true;
 
                         // Unload MIDI file
-                        if (midi_pad_player) {
-                            midi_file_pad_player_unload(midi_pad_player, selected_pad);
+                        if (performance) {
+                            medness_performance_unload_pad(performance, selected_pad);
                         }
                     }
 
@@ -3521,13 +3485,15 @@ int main(int argc, char* argv[]) {
                     float prev_tempo = tempo_bpm;
                     if (ImGui::VSliderFloat("##tempo", ImVec2(sliderW, sliderH), &tempo_bpm, 50.0f, 200.0f, "")) {
                         // Only allow changes when external clock is NOT active
-                        if (!is_external_clock && prev_tempo != tempo_bpm && midi_pad_player) {
-                            // Update MIDI file player tempo and active BPM
+                        if (!is_external_clock && prev_tempo != tempo_bpm) {
+                            // Update performance manager tempo and active BPM
                             active_bpm = tempo_bpm;
                             if (sequencer) {
                                 medness_sequencer_set_bpm(sequencer, active_bpm);
                             }
-                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
+                            if (performance) {
+                                medness_performance_set_tempo(performance, active_bpm);
+                            }
                             if (sequence_manager) {
                                 medness_performance_set_tempo(sequence_manager, active_bpm);
                             }
@@ -3545,15 +3511,15 @@ int main(int argc, char* argv[]) {
                     // Reset button (reset to default 125 BPM)
                     if (ImGui::Button("R##tempo_reset", ImVec2(sliderW, MUTE_SIZE))) {
                         tempo_bpm = 125.0f;
-                        if (midi_pad_player) {
-                            active_bpm = tempo_bpm;
-                            if (sequencer) {
-                                medness_sequencer_set_bpm(sequencer, active_bpm);
-                            }
-                            midi_file_pad_player_set_tempo(midi_pad_player, active_bpm);
-                            if (sequence_manager) {
-                                medness_performance_set_tempo(sequence_manager, active_bpm);
-                            }
+                        active_bpm = tempo_bpm;
+                        if (sequencer) {
+                            medness_sequencer_set_bpm(sequencer, active_bpm);
+                        }
+                        if (performance) {
+                            medness_performance_set_tempo(performance, active_bpm);
+                        }
+                        if (sequence_manager) {
+                            medness_performance_set_tempo(sequence_manager, active_bpm);
                         }
                     }
 
@@ -4516,12 +4482,11 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                             // Check if pad has MIDI file configured
-                            else if (midi_pad_player && pad->midi_file[0] != '\0') {
+                            else if (performance && pad->midi_file[0] != '\0') {
                                 // Check if already playing
-                                if (midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) {
+                                if (medness_performance_is_playing(performance, pad_idx)) {
                                     // Already playing - stop it
-                                    // std::cout << "=== STOPPING MIDI FILE for pad " << (pad_idx + 1) << " ===" << std::endl;
-                                    midi_file_pad_player_stop(midi_pad_player, pad_idx);
+                                    medness_performance_stop(performance, pad_idx);
                                     note_pad_fade[pad_idx] = 0.0f;
                                 } else {
                                     // Not playing - start/retrigger MIDI file playback
@@ -4529,6 +4494,10 @@ int main(int argc, char* argv[]) {
                                     std::cout << "  midi_clock.active=" << midi_clock.active << std::endl;
                                     std::cout << "  midi_clock.running=" << midi_clock.running << std::endl;
                                     std::cout << "  midi_clock.total_pulse_count=" << midi_clock.total_pulse_count << std::endl;
+
+                                    // Get current pulse from sequencer
+                                    int current_pulse = (sequencer && medness_sequencer_is_active(sequencer))
+                                        ? medness_sequencer_get_pulse(sequencer) : -1;
 
                                     // Groovebox model: patterns are always running, trigger just "unmutes" them
                                     // Start immediately at current pattern position (like unmuting a track)
@@ -4538,12 +4507,12 @@ int main(int argc, char* argv[]) {
                                         std::cout << "  Current pulse: " << midi_clock.total_pulse_count << std::endl;
 
                                         // Start immediately at current pulse - pattern is already running
-                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                        medness_performance_play(performance, pad_idx, current_pulse);
                                         note_pad_fade[pad_idx] = 1.5f;  // Bright blink for immediate start
                                     } else {
                                         // No MIDI clock - trigger from beginning
                                         std::cout << "  No MIDI clock: triggering from beginning" << std::endl;
-                                        midi_file_pad_player_trigger(midi_pad_player, pad_idx);
+                                        medness_performance_play(performance, pad_idx, current_pulse);
                                         note_pad_fade[pad_idx] = 1.5f;  // Extra bright for blink effect
                                     }
                                 }
@@ -4659,7 +4628,7 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                if (!midi_pad_player || !rsx) {
+                if (!performance || !rsx) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No pads loaded");
                 } else {
                     // Get current row from sequencer
@@ -4677,9 +4646,14 @@ int main(int argc, char* argv[]) {
 
                     std::vector<PlayingPad> playing_pads;
                     for (int pad_idx = 0; pad_idx < rsx->num_pads && pad_idx < RSX_MAX_NOTE_PADS; pad_idx++) {
-                        if (!midi_file_pad_player_is_playing(midi_pad_player, pad_idx)) continue;
+                        if (!medness_performance_is_playing(performance, pad_idx)) continue;
 
-                        MednessTrack* track = midi_file_pad_player_get_track(midi_pad_player, pad_idx);
+                        // Get the sequence player for this pad
+                        MednessSequence* seq = medness_performance_get_player(performance, pad_idx);
+                        if (!seq) continue;
+
+                        // Get the track from the sequence
+                        MednessTrack* track = medness_sequence_get_current_track(seq);
                         if (!track) continue;
 
                         int event_count = 0;
@@ -4694,8 +4668,8 @@ int main(int argc, char* argv[]) {
                         pp.events = events;
                         pp.event_count = event_count;
                         pp.tpqn = tpqn;
-                        // Get actual program number from pad (0-3 maps to display as 01-04)
-                        pp.program_num = rsx->pads[pad_idx].program + 1;
+                        // Get actual program number from pad
+                        pp.program_num = pad_program_numbers[pad_idx] + 1;
                         playing_pads.push_back(pp);
                     }
 
@@ -5823,11 +5797,11 @@ int main(int argc, char* argv[]) {
     }
 
     // Safely destroy synths
-    // Cleanup engine (frees all synths, RSX, midi_pad_player, effects)
+    // Cleanup engine (frees all synths, RSX, performance, effects)
     if (engine) {
         samplecrate_engine_destroy(engine);
         engine = nullptr;
-        // Note: synth, program_synths, rsx, midi_pad_player, effects are all owned by engine
+        // Note: synth, program_synths, rsx, performance, effects are all owned by engine
     }
 
     // Cleanup MIDI and input mappings
@@ -5838,7 +5812,7 @@ int main(int argc, char* argv[]) {
     if (lcd_display) {
         lcd_destroy(lcd_display);
     }
-    // Note: effects_master, effects_program, and midi_pad_player are freed by engine
+    // Note: effects_master, effects_program, and performance are freed by engine
     if (sequence_manager) {
         medness_performance_destroy(sequence_manager);
     }

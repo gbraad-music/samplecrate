@@ -3,13 +3,13 @@
 
 #include <sfizz.h>
 #include "samplecrate_rsx.h"
-#include "midi_file_pad_player.h"
 #include "regroove_effects.h"
 #include "samplecrate_common.h"
 #include <string>
 
 // Forward declarations
 struct MednessSequencer;
+struct MednessPerformance;
 
 // Engine state structure
 typedef struct {
@@ -21,9 +21,9 @@ typedef struct {
     sfizz_synth_t* synth;                        // Legacy/main synth
     sfizz_synth_t* program_synths[RSX_MAX_PROGRAMS];  // Per-program synths
 
-    // MIDI file player
-    MidiFilePadPlayer* midi_pad_player;
-    int midi_pad_indices[RSX_MAX_NOTE_PADS];
+    // Sequence/performance manager (handles both pads and sequences)
+    MednessPerformance* performance;
+    int pad_program_numbers[RSX_MAX_NOTE_PADS];  // Program number for each pad
 
     // Effects
     RegrooveEffects* effects_master;

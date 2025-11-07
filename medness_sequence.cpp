@@ -36,21 +36,12 @@ struct MednessSequence {
 #define MAX_SEQUENCES 16
 
 // Internal callback from MednessSequencer for MIDI events
-static void sequence_midi_callback(int status, int data1, int data2, void* userdata) {
+static void sequence_midi_callback(int note, int velocity, int on, void* userdata) {
     MednessSequence* seq = (MednessSequence*)userdata;
     if (!seq || !seq->callback) return;
 
-    int msg_type = status & 0xF0;
-    int note = data1;
-    int velocity = data2;
-
-    if (msg_type == 0x90 && velocity > 0) {
-        // Note ON
-        seq->callback(note, velocity, 1, seq->userdata);
-    } else if (msg_type == 0x80 || (msg_type == 0x90 && velocity == 0)) {
-        // Note OFF
-        seq->callback(note, 0, 0, seq->userdata);
-    }
+    // Pass through to user callback
+    seq->callback(note, velocity, on, seq->userdata);
 }
 
 // Internal callback from MednessSequencer when track loops
@@ -282,7 +273,7 @@ void medness_sequence_play(MednessSequence* player) {
 void medness_sequence_stop(MednessSequence* player) {
     if (!player || !player->sequencer) return;
 
-    std::cout << "[SEQUENCE] Stopping playback" << std::endl;
+    std::cout << "[SEQUENCE] Stopping playback (slot=" << player->sequencer_slot << ")" << std::endl;
 
     player->playing = false;
 
@@ -318,6 +309,7 @@ void medness_sequence_set_callback(MednessSequence* player, MednessSequenceEvent
     if (!player) return;
     player->callback = callback;
     player->userdata = userdata;
+    std::cout << "[SEQUENCE] Set callback: " << (void*)callback << " userdata: " << userdata << std::endl;
 }
 
 // Set the phrase change callback
@@ -386,4 +378,11 @@ float medness_sequence_get_current_phrase_duration(MednessSequence* player) {
 float medness_sequence_get_current_phrase_position(MednessSequence* player) {
     // Would need to query current position from sequencer
     return 0.0f;
+}
+
+MednessTrack* medness_sequence_get_current_track(MednessSequence* player) {
+    if (!player || player->current_phrase_index < 0) return nullptr;
+    if (player->current_phrase_index >= (int)player->phrases.size()) return nullptr;
+
+    return player->phrases[player->current_phrase_index].track;
 }

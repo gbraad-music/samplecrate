@@ -91,6 +91,19 @@ void medness_performance_jump_to_phrase(MednessPerformance* manager,
 // Get the underlying sequence player for direct access
 MednessSequence* medness_performance_get_player(MednessPerformance* manager, int seq_index);
 
+// Load a pad with a MIDI file as a single-phrase sequence
+// pad_index: 0-31 (pads use sequence slots 0-31)
+// midi_file: absolute path to MIDI file
+// program_number: which program this pad targets
+// Returns: 0 on success, -1 on error
+int medness_performance_load_pad(MednessPerformance* manager,
+                                   int pad_index,
+                                   const char* midi_file,
+                                   int program_number);
+
+// Unload a pad sequence
+void medness_performance_unload_pad(MednessPerformance* manager, int pad_index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -399,3 +399,74 @@ MednessSequence* medness_performance_get_player(MednessPerformance* manager, int
     if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return nullptr;
     return manager->players[seq_index];
 }
+
+int medness_performance_load_pad(MednessPerformance* manager,
+                                   int pad_index,
+                                   const char* midi_file,
+                                   int program_number) {
+    if (!manager || !manager->sequencer || !midi_file) return -1;
+    if (pad_index < 0 || pad_index >= RSX_MAX_NOTE_PADS) return -1;
+
+    // Unload existing pad if present
+    medness_performance_unload_pad(manager, pad_index);
+
+    std::cout << "[PAD " << (pad_index + 1) << "] Loading MIDI file: " << midi_file << std::endl;
+
+    // Create a sequence player for this pad
+    MednessSequence* seq = medness_sequence_create();
+    if (!seq) {
+        std::cerr << "[PAD " << (pad_index + 1) << "] Failed to create sequence player" << std::endl;
+        return -1;
+    }
+
+    // Set sequencer reference (pads use slots 0-31)
+    medness_sequence_set_sequencer(seq, manager->sequencer, pad_index);
+
+    // Add single phrase with infinite loop (loop_count = 0)
+    if (medness_sequence_add_phrase(seq, midi_file, 0, "Pad MIDI") < 0) {
+        std::cerr << "[PAD " << (pad_index + 1) << "] Failed to load MIDI file: " << midi_file << std::endl;
+        medness_sequence_destroy(seq);
+        return -1;
+    }
+
+    // Debug: Check if track has events
+    MednessTrack* track = medness_sequence_get_current_track(seq);
+    if (track) {
+        int event_count = 0;
+        medness_track_get_events(track, &event_count);
+        std::cout << "[PAD " << (pad_index + 1) << "] Track has " << event_count << " MIDI events" << std::endl;
+    }
+
+    // Configure sequence
+    medness_sequence_set_tempo(seq, manager->tempo_bpm);
+    medness_sequence_set_loop(seq, 1);  // Loop the sequence
+
+    // Store program number for this pad
+    manager->sequence_programs[pad_index] = program_number;
+
+    // Set callbacks (if already set)
+    if (manager->midi_callback) {
+        medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[pad_index]);
+    }
+    if (manager->phrase_callback) {
+        medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
+    }
+
+    manager->players[pad_index] = seq;
+
+    std::cout << "[PAD " << (pad_index + 1) << "] Loaded successfully (program " << (program_number + 1) << ")" << std::endl;
+    return 0;
+}
+
+void medness_performance_unload_pad(MednessPerformance* manager, int pad_index) {
+    if (!manager || pad_index < 0 || pad_index >= RSX_MAX_NOTE_PADS) return;
+
+    // Stop playback if active
+    medness_performance_stop(manager, pad_index);
+
+    // Destroy sequence player
+    if (manager->players[pad_index]) {
+        medness_sequence_destroy(manager->players[pad_index]);
+        manager->players[pad_index] = nullptr;
+    }
+}

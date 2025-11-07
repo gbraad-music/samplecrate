@@ -1,6 +1,7 @@
 #include "samplecrate_engine.h"
 #include "sfz_builder.h"
 #include "medness_sequencer.h"
+#include "medness_performance.h"
 #include <iostream>
 #include <cstring>
 #include <mutex>
@@ -29,13 +30,17 @@ SamplecrateEngine* samplecrate_engine_create(MednessSequencer* sequencer) {
     // Initialize pointers
     engine->rsx = nullptr;
     engine->synth = nullptr;
-    engine->midi_pad_player = nullptr;
+    engine->performance = nullptr;
     engine->effects_master = nullptr;
     engine->current_program = 0;
 
     for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         engine->program_synths[i] = nullptr;
         engine->effects_program[i] = nullptr;
+    }
+
+    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+        engine->pad_program_numbers[i] = 0;  // Default to program 1
     }
 
     // Initialize note suppression
@@ -53,15 +58,13 @@ SamplecrateEngine* samplecrate_engine_create(MednessSequencer* sequencer) {
     sfizz_set_sample_rate(engine->synth, 44100);
     sfizz_set_samples_per_block(engine->synth, 512);
 
-    // Create MIDI file pad player
-    engine->midi_pad_player = midi_file_pad_player_create(sequencer);
-    if (engine->midi_pad_player) {
-        midi_file_pad_player_set_tempo(engine->midi_pad_player, 125.0f);
-    }
-
-    // Initialize pad indices
-    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
-        engine->midi_pad_indices[i] = i;
+    // Create performance manager (handles both pads and sequences)
+    engine->performance = medness_performance_create();
+    if (engine->performance) {
+        medness_performance_set_sequencer(engine->performance, sequencer);
+        medness_performance_set_tempo(engine->performance, 125.0f);
+        // Set to IMMEDIATE mode for pads (start right away, not quantized)
+        medness_performance_set_start_mode(engine->performance, SEQUENCE_START_IMMEDIATE);
     }
 
     // Create effects
@@ -91,9 +94,9 @@ void samplecrate_engine_destroy(SamplecrateEngine* engine) {
         }
     }
 
-    // Free MIDI pad player
-    if (engine->midi_pad_player) {
-        midi_file_pad_player_destroy(engine->midi_pad_player);
+    // Free performance manager
+    if (engine->performance) {
+        medness_performance_destroy(engine->performance);
     }
 
     // Free effects
@@ -277,16 +280,20 @@ int samplecrate_engine_load_rsx(SamplecrateEngine* engine, const char* rsx_path)
     // Load note suppression settings
     samplecrate_engine_load_note_suppression(engine);
 
-    // Load MIDI files for all configured pads
-    if (engine->midi_pad_player) {
+    // Load MIDI files for all configured pads (using unified sequence system)
+    if (engine->performance) {
         std::cout << "Loading MIDI files for pads..." << std::endl;
         for (int i = 0; i < engine->rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
             if (engine->rsx->pads[i].midi_file[0] != '\0') {
                 char midi_path[512];
                 samplecrate_rsx_get_sfz_path(engine->rsx_file_path.c_str(), engine->rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
 
-                if (midi_file_pad_player_load(engine->midi_pad_player, i, midi_path, &engine->midi_pad_indices[i]) == 0) {
-                    std::cout << "  Pad " << (i + 1) << ": Loaded MIDI file " << midi_path << std::endl;
+                // Determine which program this pad targets
+                int prog = (engine->rsx->pads[i].program >= 0) ? engine->rsx->pads[i].program : engine->current_program;
+                engine->pad_program_numbers[i] = prog;
+
+                if (medness_performance_load_pad(engine->performance, i, midi_path, prog) == 0) {
+                    // Success message already printed by medness_performance_load_pad
                 } else {
                     std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file " << midi_path << std::endl;
                 }

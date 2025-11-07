@@ -100,6 +100,11 @@ float medness_sequence_get_current_phrase_duration(MednessSequence* player);
 // Get current position within current phrase in seconds
 float medness_sequence_get_current_phrase_position(MednessSequence* player);
 
+// Get the track for the current phrase (for visualization)
+// Forward declaration for MednessTrack
+typedef struct MednessTrack MednessTrack;
+MednessTrack* medness_sequence_get_current_track(MednessSequence* player);
+
 #ifdef __cplusplus
 }
 #endif
