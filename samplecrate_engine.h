@@ -59,4 +59,9 @@ void samplecrate_engine_autosave_effects(SamplecrateEngine* engine);
 // Audio rendering
 void samplecrate_engine_render_audio(SamplecrateEngine* engine, float* left, float* right, int num_frames);
 
+// Load pads from RSX (called from UI after RSX is loaded)
+// visual_feedback_callback: optional callback for UI visual feedback (receives pad_index in userdata)
+void samplecrate_engine_load_pads(SamplecrateEngine* engine,
+                                   void (*visual_feedback_callback)(int pad_index, int note, int velocity, int on));
+
 #endif // SAMPLECRATE_ENGINE_H

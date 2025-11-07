@@ -309,7 +309,6 @@ void medness_sequence_set_callback(MednessSequence* player, MednessSequenceEvent
     if (!player) return;
     player->callback = callback;
     player->userdata = userdata;
-    std::cout << "[SEQUENCE] Set callback: " << (void*)callback << " userdata: " << userdata << std::endl;
 }
 
 // Set the phrase change callback

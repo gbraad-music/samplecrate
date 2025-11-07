@@ -403,7 +403,7 @@ MednessSequence* medness_performance_get_player(MednessPerformance* manager, int
 int medness_performance_load_pad(MednessPerformance* manager,
                                    int pad_index,
                                    const char* midi_file,
-                                   int program_number) {
+                                   void* callback_userdata) {
     if (!manager || !manager->sequencer || !midi_file) return -1;
     if (pad_index < 0 || pad_index >= RSX_MAX_NOTE_PADS) return -1;
 
@@ -441,12 +441,10 @@ int medness_performance_load_pad(MednessPerformance* manager,
     medness_sequence_set_tempo(seq, manager->tempo_bpm);
     medness_sequence_set_loop(seq, 1);  // Loop the sequence
 
-    // Store program number for this pad
-    manager->sequence_programs[pad_index] = program_number;
-
-    // Set callbacks (if already set)
+    // Set callbacks (if already set) with provided userdata
+    // GUI code establishes the pad-to-program relationship via callback_userdata
     if (manager->midi_callback) {
-        medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[pad_index]);
+        medness_sequence_set_callback(seq, manager->midi_callback, callback_userdata);
     }
     if (manager->phrase_callback) {
         medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
@@ -454,7 +452,7 @@ int medness_performance_load_pad(MednessPerformance* manager,
 
     manager->players[pad_index] = seq;
 
-    std::cout << "[PAD " << (pad_index + 1) << "] Loaded successfully (program " << (program_number + 1) << ")" << std::endl;
+    std::cout << "[PAD " << (pad_index + 1) << "] Loaded successfully" << std::endl;
     return 0;
 }
 

@@ -280,26 +280,7 @@ int samplecrate_engine_load_rsx(SamplecrateEngine* engine, const char* rsx_path)
     // Load note suppression settings
     samplecrate_engine_load_note_suppression(engine);
 
-    // Load MIDI files for all configured pads (using unified sequence system)
-    if (engine->performance) {
-        std::cout << "Loading MIDI files for pads..." << std::endl;
-        for (int i = 0; i < engine->rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
-            if (engine->rsx->pads[i].midi_file[0] != '\0') {
-                char midi_path[512];
-                samplecrate_rsx_get_sfz_path(engine->rsx_file_path.c_str(), engine->rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
-
-                // Determine which program this pad targets
-                int prog = (engine->rsx->pads[i].program >= 0) ? engine->rsx->pads[i].program : engine->current_program;
-                engine->pad_program_numbers[i] = prog;
-
-                if (medness_performance_load_pad(engine->performance, i, midi_path, prog) == 0) {
-                    // Success message already printed by medness_performance_load_pad
-                } else {
-                    std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file " << midi_path << std::endl;
-                }
-            }
-        }
-    }
+    // Note: Pad MIDI files are loaded in main.cpp where per-pad callback contexts are available
 
     // Reset to program 0
     engine->current_program = 0;
@@ -331,4 +312,77 @@ void samplecrate_engine_autosave_effects(SamplecrateEngine* engine) {
 void samplecrate_engine_render_audio(SamplecrateEngine* engine, float* left, float* right, int num_frames) {
     // This would be implemented for headless rendering
     // For now, just placeholder
+}
+
+// Internal structure for pad MIDI callback context
+struct PadMidiContext {
+    SamplecrateEngine* engine;
+    int pad_index;
+    void (*visual_feedback_callback)(int pad_index, int note, int velocity, int on);
+};
+
+// Static storage for pad contexts (one per pad)
+static PadMidiContext pad_midi_contexts[RSX_MAX_NOTE_PADS];
+
+// Internal MIDI callback for pad playback - handles synth routing
+static void engine_pad_midi_callback(int note, int velocity, int on, void* userdata) {
+    PadMidiContext* ctx = (PadMidiContext*)userdata;
+    if (!ctx || !ctx->engine) return;
+
+    SamplecrateEngine* engine = ctx->engine;
+    int pad_index = ctx->pad_index;
+    int target_program = engine->pad_program_numbers[pad_index];
+
+    // Send to target program synth (ENGINE RESPONSIBILITY)
+    sfizz_synth_t* target_synth = engine->program_synths[target_program];
+    if (target_synth) {
+        if (on) {
+            sfizz_send_note_on(target_synth, 0, note, velocity);
+        } else {
+            sfizz_send_note_off(target_synth, 0, note, 0);
+        }
+    }
+
+    // Trigger visual feedback (UI RESPONSIBILITY - optional callback)
+    if (ctx->visual_feedback_callback) {
+        ctx->visual_feedback_callback(pad_index, note, velocity, on);
+    }
+}
+
+void samplecrate_engine_load_pads(SamplecrateEngine* engine,
+                                   void (*visual_feedback_callback)(int pad_index, int note, int velocity, int on)) {
+    if (!engine || !engine->performance || !engine->rsx) return;
+
+    // Set the engine's MIDI callback on the performance manager
+    medness_performance_set_midi_callback(engine->performance, engine_pad_midi_callback, nullptr);
+
+    std::cout << "Loading MIDI files for pads..." << std::endl;
+    for (int i = 0; i < engine->rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+        if (engine->rsx->pads[i].midi_file[0] != '\0') {
+            char midi_path[512];
+            samplecrate_rsx_get_sfz_path(engine->rsx_file_path.c_str(),
+                                         engine->rsx->pads[i].midi_file,
+                                         midi_path, sizeof(midi_path));
+
+            // Determine which program this pad targets
+            int prog = (engine->rsx->pads[i].program >= 0) ?
+                       engine->rsx->pads[i].program : engine->current_program;
+            engine->pad_program_numbers[i] = prog;
+
+            // Setup context for this pad (engine handles routing, UI handles feedback)
+            pad_midi_contexts[i].engine = engine;
+            pad_midi_contexts[i].pad_index = i;
+            pad_midi_contexts[i].visual_feedback_callback = visual_feedback_callback;
+
+            // Load pad with engine's MIDI callback
+            if (medness_performance_load_pad(engine->performance, i, midi_path,
+                                             &pad_midi_contexts[i]) == 0) {
+                std::cout << "  Pad " << (i + 1) << " loaded successfully (program "
+                          << (prog + 1) << ")" << std::endl;
+            } else {
+                std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file "
+                          << midi_path << std::endl;
+            }
+        }
+    }
 }

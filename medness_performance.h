@@ -94,12 +94,12 @@ MednessSequence* medness_performance_get_player(MednessPerformance* manager, int
 // Load a pad with a MIDI file as a single-phrase sequence
 // pad_index: 0-31 (pads use sequence slots 0-31)
 // midi_file: absolute path to MIDI file
-// program_number: which program this pad targets
+// callback_userdata: userdata to pass to MIDI callback (should contain pad_index and program info)
 // Returns: 0 on success, -1 on error
 int medness_performance_load_pad(MednessPerformance* manager,
                                    int pad_index,
                                    const char* midi_file,
-                                   int program_number);
+                                   void* callback_userdata);
 
 // Unload a pad sequence
 void medness_performance_unload_pad(MednessPerformance* manager, int pad_index);

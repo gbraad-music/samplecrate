@@ -1460,42 +1460,37 @@ void midi_file_loop_callback(void* userdata) {
 }
 
 // Debug flag for MIDI event logging (disable for better performance)
-static const bool DEBUG_MIDI_EVENTS = true;
+static const bool DEBUG_MIDI_EVENTS = false;
 
-// MIDI file player callback - sends note events to the appropriate synth
-void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
-    std::lock_guard<std::mutex> lock(synth_mutex);
-
-    // Userdata is now always int* pointing to program number
-    // (both pads and sequences use the unified medness_performance system)
-    int userdata_value = userdata ? *((int*)userdata) : -1;
-
-    // Visual feedback is now handled by the pad trigger code, not the callback
-    // (since we can't distinguish pads from sequences in the callback anymore)
+// Visual feedback callback for pad MIDI events (UI RESPONSIBILITY)
+// Called by engine when pad fires MIDI notes
+void pad_visual_feedback(int pad_index, int note, int velocity, int on) {
+    // Visual feedback: trigger white blink on THIS specific pad when note ON
+    if (on && pad_index >= 0 && pad_index < RSX_MAX_NOTE_PADS) {
+        note_pad_fade[pad_index] = 1.0f;  // Trigger white blink on note
+    }
 
     // Optional: Log event timing for debugging sync issues (causes I/O blocking!)
     if (DEBUG_MIDI_EVENTS) {
         auto now = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::cout << "[" << ms << "] NOTE prog=" << (userdata_value + 1)
+        std::cout << "[" << ms << "] PAD " << (pad_index + 1)
                   << " note=" << note << " vel=" << velocity << " " << (on ? "ON" : "OFF") << std::endl;
     }
+}
 
-    // Determine target program from userdata
+// MIDI file player callback for sequences (not pads)
+void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
+    std::lock_guard<std::mutex> lock(synth_mutex);
+
+    // For sequences, userdata is nullptr - send to current program
     int target_program = current_program;
-    if (userdata_value >= 0 && userdata_value < RSX_MAX_PROGRAMS) {
-        target_program = userdata_value;
-    }
-
-    // Note: velocity scaling for pads is no longer supported in unified system
-    // (velocity is controlled in MIDI file itself)
-    int scaled_velocity = velocity;
 
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];
     if (target_synth) {
         if (on) {
-            sfizz_send_note_on(target_synth, 0, note, scaled_velocity);
+            sfizz_send_note_on(target_synth, 0, note, velocity);
         } else {
             sfizz_send_note_off(target_synth, 0, note, 0);
         }
@@ -1727,10 +1722,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Note: performance is now created by the engine, accessed via macro
-    // Setup callbacks for the unified performance manager (handles pads and sequences from engine)
-    if (performance) {
-        medness_performance_set_midi_callback(performance, midi_file_event_callback, nullptr);
-    }
+    // Callbacks for pads are set individually per-pad (each with its own context)
+    // when pads are loaded in the pad loading code
 
     // Initialize MIDI sequence manager (for multi-phrase sequences triggered via GUI)
     sequence_manager = medness_performance_create();
@@ -1754,6 +1747,9 @@ int main(int argc, char* argv[]) {
         if (samplecrate_engine_load_rsx(engine, rsx_file_path.c_str()) != 0) {
             std::cerr << "Failed to load RSX into engine!" << std::endl;
             error_message = "Failed to load RSX";
+        } else {
+            // Load MIDI files for pads (engine handles routing, provides visual feedback callback)
+            samplecrate_engine_load_pads(engine, pad_visual_feedback);
         }
     }
 
@@ -1928,7 +1924,11 @@ int main(int argc, char* argv[]) {
             }
 
             // Update sequence pad states and blink timers
-            if (rsx && i < rsx->num_pads && rsx->pads[i].sequence_index >= 0) {
+            bool pad_has_sequence = rsx && i < rsx->num_pads && rsx->pads[i].sequence_index >= 0;
+            bool pad_has_midi_file = rsx && i < rsx->num_pads && rsx->pads[i].midi_file[0] != '\0';
+
+            if (pad_has_sequence) {
+                // Pad triggers a multi-phrase sequence via sequence_manager
                 int seq_idx = rsx->pads[i].sequence_index;
                 bool is_playing = sequence_manager && medness_performance_is_playing(sequence_manager, seq_idx);
 
@@ -1938,7 +1938,19 @@ int main(int argc, char* argv[]) {
                     sequence_pad_blink[i] += 0.1f;
                     if (sequence_pad_blink[i] > 6.28f) sequence_pad_blink[i] = 0.0f;  // 2*PI
                 } else {
-                    // TODO: Detect queued state (would need queue info from sequence manager)
+                    sequence_pad_states[i] = SEQ_PAD_IDLE;
+                    sequence_pad_blink[i] = 0.0f;
+                }
+            } else if (pad_has_midi_file) {
+                // Pad plays a MIDI file via performance manager (unified system)
+                bool is_playing = performance && medness_performance_is_playing(performance, i);
+
+                if (is_playing) {
+                    sequence_pad_states[i] = SEQ_PAD_PLAYING;
+                    // Blink timer for playing pads (sine wave for smooth pulsing)
+                    sequence_pad_blink[i] += 0.1f;
+                    if (sequence_pad_blink[i] > 6.28f) sequence_pad_blink[i] = 0.0f;  // 2*PI
+                } else {
                     sequence_pad_states[i] = SEQ_PAD_IDLE;
                     sequence_pad_blink[i] = 0.0f;
                 }
@@ -2222,6 +2234,9 @@ int main(int argc, char* argv[]) {
                                 rsx_file_path = path;  // Update current file path
 
                                 reload_sequences();  // Load sequences from RSX
+
+                                // Load MIDI files for pads (engine handles routing, provides visual feedback callback)
+                                samplecrate_engine_load_pads(engine, pad_visual_feedback);
 
                                 // Exit browse mode after successful load
                                 file_browser_mode = false;
@@ -2928,14 +2943,8 @@ int main(int argc, char* argv[]) {
                                         std::cout << "Auto-enabled pad " << (selected_pad + 1) << " for MIDI file playback" << std::endl;
                                     }
 
-                                    // Get full path relative to RSX file
-                                    char midi_path[512];
-                                    samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
-
-                                    int prog = (pad->program >= 0) ? pad->program : current_program;
-                                    if (performance && medness_performance_load_pad(performance, selected_pad, midi_path, prog) != 0) {
-                                        std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
-                                    }
+                                    // Reload pads via engine (handles routing and visual feedback)
+                                    samplecrate_engine_load_pads(engine, pad_visual_feedback);
                                 }
                                 rsx_changed = true;
                             }
@@ -2952,20 +2961,6 @@ int main(int argc, char* argv[]) {
                         pad_midi_files_loaded = false;  // Force rescan on next frame
                     }
 
-                    if (false) {  // Dummy condition to satisfy following code structure
-                        rsx_changed = true;
-
-                        // Also load on focus lost
-                        if (performance && pad->midi_file[0] != '\0') {
-                            char midi_path[512];
-                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), pad->midi_file, midi_path, sizeof(midi_path));
-
-                            int prog = (pad->program >= 0) ? pad->program : current_program;
-                            if (medness_performance_load_pad(performance, selected_pad, midi_path, prog) != 0) {
-                                std::cerr << "Failed to load MIDI file: " << midi_path << std::endl;
-                            }
-                        }
-                    }
                     ImGui::SameLine();
                     if (ImGui::Button("Clear")) {
                         pad->midi_file[0] = '\0';
