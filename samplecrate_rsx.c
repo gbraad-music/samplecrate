@@ -1,4 +1,5 @@
 #include "samplecrate_rsx.h"
+#include "input_mappings.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,6 +126,11 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->pads[i].enabled = 1;
         rsx->pads[i].program = -1;  // -1 = use current program
         rsx->pads[i].sequence_index = -1;  // -1 = no sequence trigger
+        rsx->pads[i].action = ACTION_NONE;
+        rsx->pads[i].action_parameters[0] = '\0';
+        rsx->pads[i].midi_trigger_note = -1;
+        rsx->pads[i].midi_trigger_cc = -1;
+        rsx->pads[i].midi_trigger_device = -1;
     }
 
     // Initialize note suppression (all notes enabled by default)
@@ -283,6 +289,11 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
         rsx->pads[i].program = -1;
         rsx->pads[i].midi_file[0] = '\0';
         rsx->pads[i].sequence_index = -1;
+        rsx->pads[i].action = ACTION_NONE;
+        rsx->pads[i].action_parameters[0] = '\0';
+        rsx->pads[i].midi_trigger_note = -1;
+        rsx->pads[i].midi_trigger_cc = -1;
+        rsx->pads[i].midi_trigger_device = -1;
     }
 
     // Reset sequences
@@ -562,6 +573,17 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                     rsx->pads[pad_idx].midi_file[sizeof(rsx->pads[pad_idx].midi_file) - 1] = '\0';
                 } else if (strcmp(prop, "sequence") == 0) {
                     rsx->pads[pad_idx].sequence_index = atoi(value) - 1;  // Convert from 1-based to 0-based
+                } else if (strcmp(prop, "action") == 0) {
+                    rsx->pads[pad_idx].action = (int)parse_action(value);
+                } else if (strcmp(prop, "action_parameters") == 0) {
+                    strncpy(rsx->pads[pad_idx].action_parameters, value, sizeof(rsx->pads[pad_idx].action_parameters) - 1);
+                    rsx->pads[pad_idx].action_parameters[sizeof(rsx->pads[pad_idx].action_parameters) - 1] = '\0';
+                } else if (strcmp(prop, "midi_trigger_note") == 0) {
+                    rsx->pads[pad_idx].midi_trigger_note = atoi(value);
+                } else if (strcmp(prop, "midi_trigger_cc") == 0) {
+                    rsx->pads[pad_idx].midi_trigger_cc = atoi(value);
+                } else if (strcmp(prop, "midi_trigger_device") == 0) {
+                    rsx->pads[pad_idx].midi_trigger_device = atoi(value);
                 }
             }
         }
@@ -793,6 +815,27 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
 
         if (rsx->pads[i].sequence_index >= 0) {
             fprintf(f, "pad_N%d_sequence=%d\n", pad_num, rsx->pads[i].sequence_index + 1);  // Save as 1-based
+        }
+
+        // Save action system fields (if configured)
+        if (rsx->pads[i].action != ACTION_NONE) {
+            const char* action_name = input_action_name((InputAction)rsx->pads[i].action);
+            fprintf(f, "pad_N%d_action=%s\n", pad_num, action_name);
+
+            if (rsx->pads[i].action_parameters[0] != '\0') {
+                fprintf(f, "pad_N%d_action_parameters=\"%s\"\n", pad_num, rsx->pads[i].action_parameters);
+            }
+        }
+
+        // Save MIDI trigger mapping (if configured)
+        if (rsx->pads[i].midi_trigger_note >= 0) {
+            fprintf(f, "pad_N%d_midi_trigger_note=%d\n", pad_num, rsx->pads[i].midi_trigger_note);
+        }
+        if (rsx->pads[i].midi_trigger_cc >= 0) {
+            fprintf(f, "pad_N%d_midi_trigger_cc=%d\n", pad_num, rsx->pads[i].midi_trigger_cc);
+        }
+        if (rsx->pads[i].midi_trigger_device >= 0) {
+            fprintf(f, "pad_N%d_midi_trigger_device=%d\n", pad_num, rsx->pads[i].midi_trigger_device);
         }
 
         fprintf(f, "\n");

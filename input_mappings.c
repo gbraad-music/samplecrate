@@ -38,6 +38,8 @@ InputAction parse_action(const char *str) {
     if (strcmp(str, "master_mute") == 0) return ACTION_MASTER_MUTE;
     if (strcmp(str, "playback_mute") == 0) return ACTION_PLAYBACK_MUTE;
     if (strcmp(str, "trigger_note_pad") == 0) return ACTION_TRIGGER_NOTE_PAD;
+    if (strcmp(str, "trigger_midi_file") == 0) return ACTION_TRIGGER_MIDI_FILE;
+    if (strcmp(str, "trigger_sequence") == 0) return ACTION_TRIGGER_SEQUENCE;
     if (strcmp(str, "program_prev") == 0) return ACTION_PROGRAM_PREV;
     if (strcmp(str, "program_next") == 0) return ACTION_PROGRAM_NEXT;
     if (strcmp(str, "note_suppress_toggle") == 0) return ACTION_NOTE_SUPPRESS_TOGGLE;
@@ -77,6 +79,8 @@ const char* input_action_name(InputAction action) {
         case ACTION_MASTER_MUTE: return "master_mute";
         case ACTION_PLAYBACK_MUTE: return "playback_mute";
         case ACTION_TRIGGER_NOTE_PAD: return "trigger_note_pad";
+        case ACTION_TRIGGER_MIDI_FILE: return "trigger_midi_file";
+        case ACTION_TRIGGER_SEQUENCE: return "trigger_sequence";
         case ACTION_PROGRAM_PREV: return "program_prev";
         case ACTION_PROGRAM_NEXT: return "program_next";
         case ACTION_NOTE_SUPPRESS_TOGGLE: return "note_suppress_toggle";

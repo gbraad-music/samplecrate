@@ -96,8 +96,9 @@ typedef struct {
     int program_number;                 // Program to target (0-3 for programs 1-4)
 } RSXSequence;
 
-// Note trigger pad configuration
+// Note trigger pad configuration (SONG pads - stored in .rsx files)
 typedef struct {
+    // Legacy fields (for backward compatibility - inferred to actions on load)
     int note;                           // MIDI note number
     char description[RSX_MAX_DESCRIPTION];  // Display text
     int velocity;                       // Default velocity (0-127, 0=use default)
@@ -108,6 +109,15 @@ typedef struct {
     int program;                        // Program index (0-3 for prog 1-4, -1=current program)
     char midi_file[RSX_MAX_PATH];       // MIDI file path (empty = single note mode, non-empty = play MIDI file)
     int sequence_index;                 // Sequence index to trigger (-1 = none, 0+ = sequence number)
+
+    // Action system (new - takes precedence over legacy fields)
+    int action;                         // InputAction enum value (ACTION_NONE = use legacy behavior)
+    char action_parameters[512];       // Semicolon-separated parameters for the action
+
+    // MIDI trigger mapping (which MIDI input triggers this pad)
+    int midi_trigger_note;              // MIDI note that triggers this pad (-1 = none)
+    int midi_trigger_cc;                // MIDI CC that triggers this pad (-1 = none)
+    int midi_trigger_device;            // MIDI device filter (-1 = any, 0+ = specific device)
 } NoteTriggerPad;
 
 // RSX file content

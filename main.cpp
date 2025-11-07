@@ -94,9 +94,12 @@ SamplecrateConfig config;
 
 // Input mappings and MIDI
 InputMappings* input_mappings = nullptr;
-bool learn_mode_active = false;
-InputAction learn_target_action = ACTION_NONE;
-int learn_target_parameter = 0;
+
+// MIDI learn mode (unified for both CC→Action and MIDI→Pad mapping)
+bool learn_mode_active = false;  // When true, next MIDI CC/Note will be assigned
+InputAction learn_target_action = ACTION_NONE;  // For CC→Action learning
+int learn_target_parameter = 0;  // For CC→Action learning
+int learn_target_pad = -1;       // For MIDI→Pad learning (-1 = none)
 
 // MIDI device configuration
 int midi_device_ports[MIDI_MAX_DEVICES] = {-1, -1, -1};  // -1 = not configured
@@ -676,6 +679,47 @@ void handle_input_event(InputEvent* event) {
             }
             break;
 
+        // MIDI file sequence trigger
+        case ACTION_TRIGGER_MIDI_FILE:
+            if (event->value > 63 && performance && rsx && event->parameter >= 0 && event->parameter < RSX_MAX_NOTE_PADS) {
+                int pad_idx = event->parameter;
+                NoteTriggerPad* pad = &rsx->pads[pad_idx];
+
+                if (pad->enabled && pad->midi_file[0] != '\0') {
+                    // Check if already playing
+                    if (medness_performance_is_playing(performance, pad_idx)) {
+                        // Stop it
+                        medness_performance_stop(performance, pad_idx);
+                        note_pad_fade[pad_idx] = 0.0f;
+                    } else {
+                        // Start/retrigger MIDI file playback
+                        int current_pulse = (sequencer && medness_sequencer_is_active(sequencer))
+                            ? medness_sequencer_get_pulse(sequencer) : -1;
+                        medness_performance_play(performance, pad_idx, current_pulse);
+                        note_pad_fade[pad_idx] = 1.5f;  // Visual feedback
+                    }
+                }
+            }
+            break;
+
+        // Multi-phrase sequence trigger
+        case ACTION_TRIGGER_SEQUENCE:
+            if (event->value > 63 && sequence_manager && rsx) {
+                int seq_idx = event->parameter;
+                if (seq_idx >= 0 && seq_idx < RSX_MAX_SEQUENCES) {
+                    int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+
+                    if (medness_performance_is_playing(sequence_manager, seq_idx)) {
+                        // Already playing - stop it
+                        medness_performance_stop(sequence_manager, seq_idx);
+                    } else {
+                        // Start sequence
+                        medness_performance_play(sequence_manager, seq_idx, current_pulse);
+                    }
+                }
+            }
+            break;
+
         // Program selection
         case ACTION_PROGRAM_PREV:
             if (event->value > 63 && rsx && rsx->num_programs > 1) {
@@ -871,6 +915,48 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
 void midi_event_callback(unsigned char status, unsigned char data1, unsigned char data2, int device_id, void* userdata) {
     int msg_type = status & 0xF0;
     int channel = status & 0x0F;
+
+    // MIDI Learn Mode - capture MIDI input and assign to pad
+    if (learn_mode_active && learn_target_pad >= 0) {
+        // Only learn from Note On or Control Change
+        if (msg_type == 0x90 || msg_type == 0xB0) {
+            if (rsx && learn_target_pad < RSX_MAX_NOTE_PADS) {
+                NoteTriggerPad* pad = &rsx->pads[learn_target_pad];
+
+                if (msg_type == 0x90) {  // Note On
+                    // Store the MIDI note that will trigger this pad
+                    pad->midi_trigger_note = data1;
+                    pad->midi_trigger_cc = -1;  // Clear CC mapping
+                    pad->midi_trigger_device = device_id;  // Store which device
+
+                    std::cout << "[MIDI LEARN] Pad " << (learn_target_pad + 1)
+                              << " assigned to MIDI Note " << (int)data1
+                              << " on device " << device_id << std::endl;
+
+                    // Mark RSX as modified so it gets saved
+                    // (User will need to save the .rsx file to persist)
+                }
+                else if (msg_type == 0xB0) {  // Control Change
+                    // Store the MIDI CC that will trigger this pad
+                    pad->midi_trigger_cc = data1;
+                    pad->midi_trigger_note = -1;  // Clear Note mapping
+                    pad->midi_trigger_device = device_id;  // Store which device
+
+                    std::cout << "[MIDI LEARN] Pad " << (learn_target_pad + 1)
+                              << " assigned to MIDI CC " << (int)data1
+                              << " on device " << device_id << std::endl;
+
+                    // Mark RSX as modified so it gets saved
+                    // (User will need to save the .rsx file to persist)
+                }
+
+                // Exit learn mode
+                learn_mode_active = false;
+                learn_target_pad = -1;
+                return;  // Don't process this MIDI event further
+            }
+        }
+    }
 
     // Debug: Log important real-time MIDI messages (start, stop, continue, SPP)
     // Clock (0xF8) is too spammy - it fires 24 times per beat!
@@ -1173,6 +1259,70 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             add_to_midi_monitor(device_id, "Prog Change", program_number, 0, target_program + 1);
         }
         return;
+    }
+
+    // Check if this MIDI note/CC triggers any SONG pads (via MIDI learn)
+    if ((msg_type == 0x90 && data2 > 0) || msg_type == 0xB0) {
+        if (rsx) {
+            for (int i = 0; i < RSX_MAX_NOTE_PADS && i < rsx->num_pads; i++) {
+                NoteTriggerPad* pad = &rsx->pads[i];
+
+                // Check if this MIDI input matches the pad's trigger mapping
+                bool note_match = (msg_type == 0x90 && pad->midi_trigger_note == data1);
+                bool cc_match = (msg_type == 0xB0 && pad->midi_trigger_cc == data1);
+                bool device_match = (pad->midi_trigger_device == -1 || pad->midi_trigger_device == device_id);
+
+                if ((note_match || cc_match) && device_match && pad->enabled) {
+                    // Trigger the pad based on its action or legacy behavior
+                    if (pad->action != ACTION_NONE) {
+                        // New action system - trigger the configured action
+                        InputEvent event;
+                        event.action = (InputAction)pad->action;
+                        event.parameter = i;  // Pass pad index as parameter
+                        event.value = (msg_type == 0xB0) ? data2 : 127;  // Use CC value or max velocity
+                        handle_input_event(&event);
+                    } else {
+                        // Legacy behavior - trigger the pad based on legacy fields
+                        // This includes note, midi_file, sequence_index
+                        if (pad->midi_file[0] != '\0') {
+                            // MIDI file trigger
+                            if (performance && medness_performance_is_playing(performance, i)) {
+                                medness_performance_stop(performance, i);
+                                note_pad_fade[i] = 0.0f;
+                            } else {
+                                int current_pulse = (sequencer && medness_sequencer_is_active(sequencer))
+                                    ? medness_sequencer_get_pulse(sequencer) : -1;
+                                medness_performance_play(performance, i, current_pulse);
+                                note_pad_fade[i] = 1.5f;
+                            }
+                        } else if (pad->sequence_index >= 0) {
+                            // Sequence trigger
+                            if (sequence_manager) {
+                                int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+                                if (medness_performance_is_playing(sequence_manager, pad->sequence_index)) {
+                                    medness_performance_stop(sequence_manager, pad->sequence_index);
+                                } else {
+                                    medness_performance_play(sequence_manager, pad->sequence_index, current_pulse);
+                                }
+                            }
+                        } else if (pad->note >= 0) {
+                            // Single note trigger
+                            int target_prog = (pad->program >= 0) ? pad->program : current_program;
+                            std::lock_guard<std::mutex> lock(synth_mutex);
+                            sfizz_synth_t* target_synth = program_synths[target_prog];
+                            if (target_synth) {
+                                int vel = (pad->velocity > 0) ? pad->velocity : 100;
+                                sfizz_send_note_on(target_synth, 0, pad->note, vel);
+                                note_pad_fade[i] = 1.0f;
+                            }
+                        }
+                    }
+
+                    // If this was a CC trigger or Note trigger for a pad, don't continue processing as normal MIDI
+                    return;
+                }
+            }
+        }
     }
 
     // Handle note on/off
@@ -2409,6 +2559,7 @@ int main(int argc, char* argv[]) {
                 if (!learn_mode_active) {
                     learn_target_action = ACTION_NONE;
                     learn_target_parameter = 0;
+                    learn_target_pad = -1;  // Clear pad learn target
                 }
             }
             ImGui::PopStyleColor();
@@ -4330,6 +4481,17 @@ int main(int argc, char* argv[]) {
                                 0.30f + note_brightness * 0.60f,
                                 1.0f
                             );
+                        } else if (learn_mode_active && learn_target_pad == pad_idx) {
+                            // Waiting for MIDI input for this pad - RED pulsing
+                            static float learn_pulse_phase = 0.0f;
+                            learn_pulse_phase += 0.1f;
+                            float pulse = sinf(learn_pulse_phase) * 0.5f + 0.5f;
+                            pad_col = ImVec4(
+                                0.7f + pulse * 0.2f,  // Red pulses 0.7-0.9
+                                0.1f,
+                                0.1f,
+                                1.0f
+                            );
                         } else if (!pad_configured) {
                             // Not configured (darker gray)
                             pad_col = COLOR_BUTTON_AT_LIMIT;
@@ -4565,9 +4727,12 @@ int main(int argc, char* argv[]) {
                         } else if (is_active && !pad_configured && !learn_mode_active) {
                             // Clicked on unconfigured pad - do nothing
                         } else if (is_active && learn_mode_active) {
-                            // Learn mode - start learning for this pad
+                            // Learn mode - set this pad as the target for MIDI note/CC learning
+                            // (The next MIDI note or CC received will be assigned to this pad)
                             if (!was_held) {  // Only trigger once on initial press
-                                start_learn_for_action(ACTION_TRIGGER_NOTE_PAD, pad_idx);
+                                learn_target_pad = pad_idx;
+                                learn_target_action = ACTION_NONE;  // Clear action learning
+                                std::cout << "[MIDI LEARN] Waiting for MIDI input to assign to Pad " << (pad_idx + 1) << std::endl;
                             }
                         }
 
@@ -5541,6 +5706,101 @@ int main(int argc, char* argv[]) {
 
                     ImGui::Spacing();
                     ImGui::Text("Use LEARN mode to create new MIDI mappings");
+                }
+
+                // SONG Pad MIDI Triggers (from .rsx file)
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Text("SONG Pad MIDI Triggers:");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(Stored in .rsx file)");
+                ImGui::Spacing();
+
+                if (!rsx || rsx->num_pads == 0) {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No .rsx file loaded");
+                } else {
+                    // Count how many pads have MIDI triggers
+                    int trigger_count = 0;
+                    for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+                        if (rsx->pads[i].midi_trigger_note >= 0 || rsx->pads[i].midi_trigger_cc >= 0) {
+                            trigger_count++;
+                        }
+                    }
+
+                    if (trigger_count == 0) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No SONG pads have MIDI triggers configured");
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Use LEARN mode + click a pad to assign MIDI input");
+                    } else {
+                        // Table for SONG pad triggers
+                        ImGui::Columns(5, "song_pad_triggers_table", true);
+                        ImGui::Text("Pad");
+                        ImGui::NextColumn();
+                        ImGui::Text("Device");
+                        ImGui::NextColumn();
+                        ImGui::Text("Note/CC");
+                        ImGui::NextColumn();
+                        ImGui::Text("Description");
+                        ImGui::NextColumn();
+                        ImGui::Text("");  // Remove button column
+                        ImGui::NextColumn();
+                        ImGui::Separator();
+
+                        for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
+                            NoteTriggerPad* pad = &rsx->pads[i];
+                            if (pad->midi_trigger_note < 0 && pad->midi_trigger_cc < 0) continue;
+
+                            ImGui::PushID(i + 10000);  // Offset ID to avoid conflict with CC mappings
+
+                            // Pad number column
+                            ImGui::Text("N%d", i + 1);
+                            ImGui::NextColumn();
+
+                            // Device column
+                            if (pad->midi_trigger_device == -1) {
+                                ImGui::Text("Any");
+                            } else {
+                                ImGui::Text("%d", pad->midi_trigger_device);
+                            }
+                            ImGui::NextColumn();
+
+                            // Note/CC column
+                            if (pad->midi_trigger_note >= 0) {
+                                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Note %d", pad->midi_trigger_note);
+                            } else if (pad->midi_trigger_cc >= 0) {
+                                ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.9f, 1.0f), "CC %d", pad->midi_trigger_cc);
+                            }
+                            ImGui::NextColumn();
+
+                            // Description column
+                            if (pad->description[0] != '\0') {
+                                ImGui::Text("%s", pad->description);
+                            } else if (pad->midi_file[0] != '\0') {
+                                const char* filename = strrchr(pad->midi_file, '/');
+                                if (!filename) filename = strrchr(pad->midi_file, '\\');
+                                if (!filename) filename = pad->midi_file;
+                                else filename++;
+                                ImGui::Text("%s", filename);
+                            } else if (pad->note >= 0) {
+                                ImGui::Text("Note %d", pad->note);
+                            } else {
+                                ImGui::Text("(unconfigured)");
+                            }
+                            ImGui::NextColumn();
+
+                            // Remove button
+                            if (ImGui::Button("Remove", ImVec2(80, 0))) {
+                                pad->midi_trigger_note = -1;
+                                pad->midi_trigger_cc = -1;
+                                pad->midi_trigger_device = -1;
+                                std::cout << "[MIDI LEARN] Cleared MIDI trigger for Pad " << (i + 1) << std::endl;
+                            }
+                            ImGui::NextColumn();
+
+                            ImGui::PopID();
+                        }
+
+                        ImGui::Columns(1);
+                    }
                 }
 
                 // MIDI Monitor

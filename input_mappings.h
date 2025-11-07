@@ -39,7 +39,10 @@ typedef enum {
     ACTION_MASTER_MUTE,            // toggle master mute
     ACTION_PLAYBACK_MUTE,          // toggle playback mute
     // Note pad trigger (parameter = pad index 0-31)
-    ACTION_TRIGGER_NOTE_PAD,       // trigger a note pad
+    ACTION_TRIGGER_NOTE_PAD,       // trigger a note pad (sends single MIDI note)
+    // MIDI file / sequence triggers
+    ACTION_TRIGGER_MIDI_FILE,      // trigger MIDI file playback (parameter = pad index with midi_file)
+    ACTION_TRIGGER_SEQUENCE,       // trigger multi-phrase sequence (parameter = sequence index)
     // Program selection
     ACTION_PROGRAM_PREV,           // previous program (P-)
     ACTION_PROGRAM_NEXT,           // next program (P+)
