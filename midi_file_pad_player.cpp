@@ -86,7 +86,7 @@ int midi_file_pad_player_load(MidiFilePadPlayer* pad_player, int pad_index, cons
     pad_player->tracks[pad_index] = track;
     pad_player->userdatas[pad_index] = userdata;
 
-    std::cout << "  Pad " << pad_index << ": Loaded MIDI file " << filename << std::endl;
+    // Note: Caller (engine) prints the success message
 
     return 0;
 }

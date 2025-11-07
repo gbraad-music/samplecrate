@@ -43,6 +43,8 @@ extern "C" {
 #include "medness_performance.h"
 }
 
+#include "samplecrate_engine.h"
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -63,19 +65,33 @@ static const ImVec4 COLOR_BUTTON_INACTIVE = ImVec4(0.26f, 0.27f, 0.30f, 1.0f); /
 static const ImVec4 COLOR_BUTTON_AT_LIMIT = ImVec4(0.16f, 0.17f, 0.18f, 1.0f); // Very dark for nav buttons at limit (P-/P+ can't go further)
 static const ImVec4 COLOR_LEARN_ACTIVE = ImVec4(0.90f, 0.15f, 0.18f, 1.0f);    // Red for LEARN mode
 
-sfizz_synth_t* synth = nullptr;  // Current/legacy synth
-sfizz_synth_t* program_synths[RSX_MAX_PROGRAMS] = {nullptr};  // One synth per program
+// =============================================================================
+// CORE ENGINE - All audio/MIDI state lives here for headless operation
+// =============================================================================
+SamplecrateEngine* engine = nullptr;
+
+// Convenience accessors (point to engine internals)
+#define synth (engine->synth)
+#define program_synths (engine->program_synths)
+#define rsx (engine->rsx)
+#define midi_pad_player (engine->midi_pad_player)
+#define midi_pad_indices (engine->midi_pad_indices)
+#define current_program (engine->current_program)
+#define mixer (engine->mixer)
+#define effects_master (engine->effects_master)
+#define effects_program (engine->effects_program)
+#define note_suppressed (engine->note_suppressed)
+
+// =============================================================================
+// GUI-ONLY STATE - Does not affect headless operation
+// =============================================================================
 std::atomic<bool> running(true);
 std::mutex synth_mutex;
 LCD* lcd_display = nullptr;
 int current_note = -1;
 int current_velocity = 0;
 
-// Mixer and effects
-SamplecrateMixer mixer;
 SamplecrateConfig config;
-RegrooveEffects* effects_master = nullptr;     // Master FX chain
-RegrooveEffects* effects_program[RSX_MAX_PROGRAMS] = {nullptr};  // Per-program FX chains
 
 // Input mappings and MIDI
 InputMappings* input_mappings = nullptr;
@@ -90,25 +106,18 @@ int midi_device_ports[MIDI_MAX_DEVICES] = {-1, -1, -1};  // -1 = not configured
 SDL_AudioDeviceID current_audio_device_id = 0;  // Current audio device ID
 int num_audio_devices = 0;  // Number of available audio output devices
 
-// RSX file (note pads and SFZ wrapper)
-SamplecrateRSX* rsx = nullptr;
+// RSX file path (GUI state - actual RSX lives in engine)
 std::string rsx_file_path = "";
 
 // File browser for .rsx and .sfz files
 SamplecrateFileList* file_list = nullptr;
 bool file_browser_mode = false;  // Set to true when browsing (shows filename in LCD)
 
-// MIDI file pad player
-MidiFilePadPlayer* midi_pad_player = nullptr;
-
 // Pattern sequencer (single source of truth for pattern position)
 MednessSequencer* sequencer = nullptr;
 
 // MIDI sequence manager (for multi-phrase sequences)
 MednessPerformance* sequence_manager = nullptr;
-
-// Pad index storage for MIDI file callbacks (so each pad knows which program to use)
-int midi_pad_indices[RSX_MAX_NOTE_PADS];
 
 // MIDI sync settings
 
@@ -133,13 +142,7 @@ float sequence_pad_blink[RSX_MAX_NOTE_PADS] = {0.0f};  // Blink timer for playin
 // Step sequencer visual feedback (16 steps represent 64 rows)
 float step_fade[16] = {0.0f};  // Brightness for each step
 
-// Note suppression state (128 MIDI notes, 0-127)
-// [note][0] = global suppression (program -1)
-// [note][1-128] = per-program suppression for programs 0-127
-bool note_suppressed[128][RSX_MAX_PROGRAMS + 1] = {false};
-
-// Current program selection (which SFZ is loaded)
-int current_program = 0;  // 0-127 for programs 1-128 (UI selection)
+// Note: note_suppressed and current_program are now in the engine (accessed via macros)
 int midi_target_program[3] = {0, 0, 0};  // Per-device MIDI routing (set by program change messages)
 
 // MIDI clock tracking
@@ -393,105 +396,7 @@ void reload_sequences() {
     }
 }
 
-// Helper: reload a single program synth instance
-void reload_program(int program_idx) {
-    if (!rsx || program_idx < 0 || program_idx >= RSX_MAX_PROGRAMS) return;
-
-    std::lock_guard<std::mutex> lock(synth_mutex);
-
-    // Free existing synth if it exists
-    if (program_synths[program_idx]) {
-        sfizz_free(program_synths[program_idx]);
-        program_synths[program_idx] = nullptr;
-    }
-
-    // Skip if no content to load
-    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SFZ_FILE && rsx->program_files[program_idx][0] == '\0') return;
-    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SAMPLES && rsx->program_sample_counts[program_idx] == 0) return;
-
-    // Create new synth instance
-    program_synths[program_idx] = sfizz_create_synth();
-    sfizz_set_sample_rate(program_synths[program_idx], 44100);
-    sfizz_set_samples_per_block(program_synths[program_idx], 512);
-
-    bool load_success = false;
-
-    if (rsx->program_modes[program_idx] == PROGRAM_MODE_SFZ_FILE) {
-        // Load from SFZ file
-        char sfz_path[512];
-        samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->program_files[program_idx], sfz_path, sizeof(sfz_path));
-
-        std::cout << "Reloading Program " << (program_idx + 1) << " (SFZ File: " << rsx->program_files[program_idx] << ")" << std::endl;
-        if (sfizz_load_file(program_synths[program_idx], sfz_path)) {
-            load_success = true;
-            int num_regions = sfizz_get_num_regions(program_synths[program_idx]);
-            std::cout << "  SUCCESS: Loaded " << num_regions << " regions" << std::endl;
-        } else {
-            std::cerr << "ERROR: Failed to load program " << (program_idx + 1) << ": " << sfz_path << std::endl;
-        }
-    }
-    else if (rsx->program_modes[program_idx] == PROGRAM_MODE_SAMPLES) {
-        // Build from samples
-        std::cout << "Reloading Program " << (program_idx + 1) << " (Samples: " << rsx->program_sample_counts[program_idx] << ")" << std::endl;
-
-        SFZBuilder* builder = sfz_builder_create(44100);
-        if (builder) {
-            for (int s = 0; s < rsx->program_sample_counts[program_idx]; s++) {
-                RSXSampleMapping* sample = &rsx->program_samples[program_idx][s];
-
-                // Only add samples that are enabled AND have a valid path
-                if (sample->enabled && sample->sample_path[0] != '\0') {
-                    // Use sample path as-is (sfizz will resolve relative to virtual path's directory)
-                    std::cout << "  Sample " << (s + 1) << ": " << sample->sample_path << std::endl;
-
-                    sfz_builder_add_region(builder,
-                                          sample->sample_path,
-                                          sample->key_low,
-                                          sample->key_high,
-                                          sample->root_key,
-                                          sample->vel_low,
-                                          sample->vel_high,
-                                          sample->amplitude,
-                                          sample->pan);
-                }
-            }
-
-            // Get RSX directory to write temp file
-            char rsx_dir[512];
-            strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
-            rsx_dir[sizeof(rsx_dir) - 1] = '\0';
-
-            char* dir = dirname(rsx_dir);
-            char absolute_dir[1024];
-            char* resolved = cross_platform_realpath(dir, absolute_dir);
-            const char* base_path = resolved ? absolute_dir : dir;
-
-            // Load directly using sfz_builder_load (tries string first, falls back to temp file)
-            if (sfz_builder_load(builder, program_synths[program_idx], base_path) == 0) {
-                load_success = true;
-                int num_regions = sfizz_get_num_regions(program_synths[program_idx]);
-                std::cout << "  SUCCESS: Built " << num_regions << " regions" << std::endl;
-            } else {
-                std::cerr << "ERROR: Failed to build program " << (program_idx + 1) << " from samples" << std::endl;
-            }
-
-            sfz_builder_destroy(builder);
-        }
-    }
-
-    if (!load_success) {
-        error_message = "Failed to load\nProgram " + std::to_string(program_idx + 1);
-        sfizz_free(program_synths[program_idx]);
-        program_synths[program_idx] = nullptr;
-    } else {
-        error_message = "";  // Clear error on success
-
-        // Update main synth pointer if this is the current program
-        if (current_program == program_idx) {
-            synth = program_synths[program_idx];
-        }
-    }
-}
+// Note: reload_program functionality is now in samplecrate_engine_reload_program()
 
 // Helper: save current effects state to RSX file (auto-save)
 void autosave_effects_to_rsx() {
@@ -940,7 +845,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         printf("[SysEx] Successfully loaded: %s\n", filename);
                         // Reload programs
                         for (int i = 0; i < rsx->num_programs; i++) {
-                            reload_program(i);
+                            samplecrate_engine_reload_program(engine, i);
                         }
                         load_note_suppression_from_rsx();
                         reload_sequences();  // Load sequences from RSX
@@ -1664,81 +1569,35 @@ int main(int argc, char* argv[]) {
         else if (len > 4 && strcmp(input_file + len - 4, ".rsx") == 0) {
             is_rsx = true;
 
-            // Load RSX file
-            rsx = samplecrate_rsx_create();
-            if (samplecrate_rsx_load(rsx, input_file) == 0) {
-                rsx_file_path = input_file;  // Store RSX path for saving later
-                std::cout << "Loaded RSX file: " << input_file << std::endl;
-                // Note: reload_sequences() will be called after sequence_manager is created
+            // Store RSX path - will be loaded into engine later
+            rsx_file_path = input_file;
+            std::cout << "RSX file specified: " << input_file << " (will load into engine)" << std::endl;
+            // Note: reload_sequences() will be called after sequence_manager is created
 
-                // Initialize file browser with the directory of the loaded RSX file
-                std::string dir = input_file;
-                size_t last_slash = dir.find_last_of("/\\");
-                if (last_slash != std::string::npos) {
-                    dir = dir.substr(0, last_slash);
-                    file_list = samplecrate_filelist_create();
-                    if (file_list) {
-                        int file_count = samplecrate_filelist_load(file_list, dir.c_str());
-                        std::cout << "File browser: Loaded " << file_count << " files from " << dir << std::endl;
+            // Initialize file browser with the directory of the loaded RSX file
+            std::string dir = input_file;
+            size_t last_slash = dir.find_last_of("/\\");
+            if (last_slash != std::string::npos) {
+                dir = dir.substr(0, last_slash);
+                file_list = samplecrate_filelist_create();
+                if (file_list) {
+                    int file_count = samplecrate_filelist_load(file_list, dir.c_str());
+                    std::cout << "File browser: Loaded " << file_count << " files from " << dir << std::endl;
 
-                        // Find and set current file as current index
-                        const char* current_filename = strrchr(input_file, '/');
-                        if (!current_filename) current_filename = strrchr(input_file, '\\');
-                        if (current_filename) {
-                            current_filename++;  // Skip the slash
-                            for (int i = 0; i < file_list->count; i++) {
-                                if (strcmp(file_list->filenames[i], current_filename) == 0) {
-                                    file_list->current_index = i;
-                                    std::cout << "  Current file: " << current_filename << " (index " << i << ")" << std::endl;
-                                    break;
-                                }
+                    // Find and set current file as current index
+                    const char* current_filename = strrchr(input_file, '/');
+                    if (!current_filename) current_filename = strrchr(input_file, '\\');
+                    if (current_filename) {
+                        current_filename++;  // Skip the slash
+                        for (int i = 0; i < file_list->count; i++) {
+                            if (strcmp(file_list->filenames[i], current_filename) == 0) {
+                                file_list->current_index = i;
+                                std::cout << "  Current file: " << current_filename << " (index " << i << ")" << std::endl;
+                                break;
                             }
                         }
                     }
                 }
-
-                // Use programs if defined, otherwise fall back to legacy sfz_file
-                const char* sfz_to_load = nullptr;
-                if (rsx->num_programs > 0 && rsx->program_files[0][0] != '\0') {
-                    sfz_to_load = rsx->program_files[0];  // Load program 1 (scene 1) by default
-                    std::cout << "  Programs: " << rsx->num_programs << std::endl;
-                    for (int i = 0; i < rsx->num_programs; i++) {
-                        if (rsx->program_files[i][0] != '\0') {
-                            std::cout << "    Program " << (i+1) << ": " << rsx->program_files[i] << std::endl;
-                        }
-                    }
-                } else {
-                    sfz_to_load = rsx->sfz_file;  // Legacy single SFZ file
-                    std::cout << "  SFZ file: " << rsx->sfz_file << std::endl;
-                }
-                std::cout << "  Note pads: " << rsx->num_pads << std::endl;
-
-                // Get full SFZ path
-                char sfz_path[512];
-                samplecrate_rsx_get_sfz_path(input_file, sfz_to_load, sfz_path, sizeof(sfz_path));
-                sfz_file = strdup(sfz_path);  // Make a copy
-
-                // Extract filename for display
-                const char* last_slash_ptr = strrchr(sfz_to_load, '/');
-                if (last_slash_ptr) {
-                    sfz_filename = last_slash_ptr + 1;
-                } else {
-                    sfz_filename = sfz_to_load;
-                }
-            } else {
-                std::cerr << "Failed to load RSX file: " << input_file << std::endl;
-                samplecrate_rsx_destroy(rsx);
-                rsx = nullptr;
-            }
-        } else {
-            // Direct SFZ file
-            sfz_file = input_file;
-            // Extract just the filename from the path
-            const char* last_slash = strrchr(input_file, '/');
-            if (last_slash) {
-                sfz_filename = last_slash + 1;
-            } else {
-                sfz_filename = input_file;
             }
         }
     } else {
@@ -1820,23 +1679,35 @@ int main(int argc, char* argv[]) {
     // Initialize LCD display (20x4 character display)
     lcd_display = lcd_init(LCD_COLS, LCD_ROWS);
 
-    // Initialize mixer and effects
-    samplecrate_mixer_init(&mixer);
+    // Load config (before engine creation so we can apply defaults)
     samplecrate_config_init(&config);
     samplecrate_config_load(&config, "samplecrate.ini");
 
     // Load expanded pads setting from config
     expanded_pads = (config.expanded_pads != 0);
 
+    // Initialize pattern sequencer (single source of truth for pattern position)
+    sequencer = medness_sequencer_create();
+    if (sequencer) {
+        medness_sequencer_set_bpm(sequencer, 125.0f);  // Default BPM
+        medness_sequencer_set_active(sequencer, 1);    // Always active
+    }
 
-    // Apply config defaults to mixer
+    // Create engine (contains all audio/MIDI state for headless operation)
+    engine = samplecrate_engine_create(sequencer);
+    if (!engine) {
+        std::cerr << "Failed to create engine!" << std::endl;
+        return -1;
+    }
+
+    // Initialize mixer (now that engine exists) and apply config defaults
+    samplecrate_mixer_init(&mixer);
     mixer.master_volume = config.default_master_volume;
     mixer.master_pan = config.default_master_pan;
     mixer.playback_volume = config.default_playback_volume;
     mixer.playback_pan = config.default_playback_pan;
 
-    // Create master effects and apply defaults from config
-    effects_master = regroove_effects_create();
+    // Apply config defaults to effects (created by engine)
     if (effects_master) {
         regroove_effects_set_distortion_drive(effects_master, config.fx_distortion_drive);
         regroove_effects_set_distortion_mix(effects_master, config.fx_distortion_mix);
@@ -1861,9 +1732,8 @@ int main(int argc, char* argv[]) {
         regroove_effects_set_delay_mix(effects_master, config.fx_delay_mix);
     }
 
-    // Create per-program effects (same defaults initially)
-    for (int i = 0; i < 4; i++) {
-        effects_program[i] = regroove_effects_create();
+    // Apply config defaults to per-program effects
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         if (effects_program[i]) {
             regroove_effects_set_distortion_drive(effects_program[i], config.fx_distortion_drive);
             regroove_effects_set_distortion_mix(effects_program[i], config.fx_distortion_mix);
@@ -1889,15 +1759,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Initialize pattern sequencer (single source of truth for pattern position)
-    sequencer = medness_sequencer_create();
-    if (sequencer) {
-        medness_sequencer_set_bpm(sequencer, 125.0f);  // Default BPM
-        medness_sequencer_set_active(sequencer, 1);    // Always active
-    }
-
-    // Initialize MIDI file pad player (now just manages tracks, sequencer plays them)
-    midi_pad_player = midi_file_pad_player_create(sequencer);
+    // Note: midi_pad_player is now created by the engine, accessed via macro
     if (midi_pad_player) {
         midi_file_pad_player_set_callback(midi_pad_player, midi_file_event_callback, nullptr);
         midi_file_pad_player_set_loop_callback(midi_pad_player, midi_file_loop_callback, nullptr);
@@ -1920,120 +1782,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Initialize pad indices array for MIDI file callbacks
-    for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
-        midi_pad_indices[i] = i;
+    // If RSX was specified from command line, load it into the engine
+    if (!rsx_file_path.empty()) {
+        std::cout << "Loading RSX into engine: " << rsx_file_path << std::endl;
+        if (samplecrate_engine_load_rsx(engine, rsx_file_path.c_str()) != 0) {
+            std::cerr << "Failed to load RSX into engine!" << std::endl;
+            error_message = "Failed to load RSX";
+        }
     }
 
-    // Init sfizz - create main synth and program synths
-    synth = sfizz_create_synth();
-    sfizz_set_sample_rate(synth, 44100);
-    sfizz_set_samples_per_block(synth, 512);
-
-    // If RSX has multiple programs, load them all into separate synth instances
+    // Apply mixer and effects settings from RSX if loaded (via engine accessor)
     if (rsx && rsx->num_programs > 0) {
-        std::cout << "Loading " << rsx->num_programs << " programs into separate synth instances" << std::endl;
-
-        for (int i = 0; i < rsx->num_programs; i++) {
-            // Skip empty programs
-            if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE && rsx->program_files[i][0] == '\0') continue;
-            if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES && rsx->program_sample_counts[i] == 0) continue;
-
-            // Create synth instance for this program
-            program_synths[i] = sfizz_create_synth();
-            sfizz_set_sample_rate(program_synths[i], 44100);
-            sfizz_set_samples_per_block(program_synths[i], 512);
-
-            bool load_success = false;
-            int num_regions = 0;
-
-            if (rsx->program_modes[i] == PROGRAM_MODE_SFZ_FILE) {
-                // Load from SFZ file
-                char sfz_path[512];
-                samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->program_files[i], sfz_path, sizeof(sfz_path));
-
-                std::cout << "Program " << (i + 1) << " (SFZ File: " << rsx->program_files[i] << "): loading..." << std::endl;
-                if (sfizz_load_file(program_synths[i], sfz_path)) {
-                    load_success = true;
-                    num_regions = sfizz_get_num_regions(program_synths[i]);
-                } else {
-                    std::cerr << "ERROR: Failed to load program " << (i + 1) << ": " << sfz_path << std::endl;
-                }
-            }
-            else if (rsx->program_modes[i] == PROGRAM_MODE_SAMPLES) {
-                // Build from samples
-                std::cout << "Program " << (i + 1) << " (Samples: " << rsx->program_sample_counts[i] << "): building..." << std::endl;
-
-                SFZBuilder* builder = sfz_builder_create(44100);
-                if (builder) {
-                    for (int s = 0; s < rsx->program_sample_counts[i]; s++) {
-                        RSXSampleMapping* sample = &rsx->program_samples[i][s];
-
-                        // Only add samples that are enabled AND have a valid path
-                        if (sample->enabled && sample->sample_path[0] != '\0') {
-                            // Use sample path as-is (sfizz will resolve relative to virtual path's directory)
-                            std::cout << "  Sample " << (s + 1) << ": " << sample->sample_path << std::endl;
-
-                            sfz_builder_add_region(builder,
-                                                  sample->sample_path,
-                                                  sample->key_low,
-                                                  sample->key_high,
-                                                  sample->root_key,
-                                                  sample->vel_low,
-                                                  sample->vel_high,
-                                                  sample->amplitude,
-                                                  sample->pan);
-                        }
-                    }
-
-                    // Get RSX directory to write temp file
-                    char rsx_dir[512];
-                    strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
-                    rsx_dir[sizeof(rsx_dir) - 1] = '\0';
-
-                    char* dir = dirname(rsx_dir);
-                    char absolute_dir[1024];
-                    char* resolved = cross_platform_realpath(dir, absolute_dir);
-                    const char* base_path = resolved ? absolute_dir : dir;
-
-                    // Load directly using sfz_builder_load (tries string first, falls back to temp file)
-                    if (sfz_builder_load(builder, program_synths[i], base_path) == 0) {
-                        load_success = true;
-                        num_regions = sfizz_get_num_regions(program_synths[i]);
-                    } else {
-                        std::cerr << "ERROR: Failed to build program " << (i + 1) << " from samples" << std::endl;
-                    }
-
-                    sfz_builder_destroy(builder);
-                } else {
-                    std::cerr << "ERROR: Failed to create SFZ builder for program " << (i + 1) << std::endl;
-                }
-            }
-
-            if (!load_success) {
-                error_message = "Failed to load\nProgram " + std::to_string(i + 1);
-                sfizz_free(program_synths[i]);
-                program_synths[i] = nullptr;
-            } else {
-                std::cout << "  SUCCESS: Loaded " << num_regions << " regions" << std::endl;
-
-                if (num_regions == 0) {
-                    std::cerr << "  WARNING: No regions loaded for program " << (i + 1) << std::endl;
-                    error_message = "No samples in\nProgram " + std::to_string(i + 1);
-                }
-            }
-        }
-
-        // Set main synth to point to first program synth
-        if (program_synths[0]) {
-            synth = program_synths[0];
-            current_program = 0;
-            midi_target_program[0] = 0;  // Initialize MIDI routing to first program
-            midi_target_program[1] = 0;
-            midi_target_program[2] = 0;
-            error_message = "";  // Clear error if first program loaded successfully
-        }
-
         // Apply program volume and pan settings from RSX
         for (int i = 0; i < rsx->num_programs; i++) {
             mixer.program_volumes[i] = rsx->program_volumes[i];
@@ -2060,47 +1819,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  Program " << (i + 1) << " effects loaded from RSX (enabled=" << mixer.program_fx_enable[i] << ")" << std::endl;
             }
         }
-
-        // Load note suppression settings from RSX
-        load_note_suppression_from_rsx();
-        std::cout << "Note suppression settings loaded from RSX" << std::endl;
-
-        // Load MIDI files for all configured pads
-        if (midi_pad_player) {
-            std::cout << "Loading MIDI files for pads..." << std::endl;
-            for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
-                if (rsx->pads[i].midi_file[0] != '\0') {
-                    char midi_path[512];
-                    samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
-
-                    if (midi_file_pad_player_load(midi_pad_player, i, midi_path, &midi_pad_indices[i]) == 0) {
-                        std::cout << "  Pad " << (i + 1) << ": Loaded MIDI file " << midi_path << std::endl;
-                    } else {
-                        std::cerr << "  Pad " << (i + 1) << ": Failed to load MIDI file " << midi_path << std::endl;
-                    }
-                }
-            }
-        }
-    } else {
-        // No programs defined, load single SFZ file into main synth
-        std::cout << "Loading SFZ file into sfizz: " << sfz_file << std::endl;
-        if (!sfizz_load_file(synth, sfz_file)) {
-            std::cerr << "ERROR: Failed to load SFZ file: " << sfz_file << std::endl;
-            std::cerr << "Check that the file exists and paths are correct" << std::endl;
-            error_message = "Failed to load:\n" + std::string(sfz_file);
-        } else {
-            std::cout << "SUCCESS: SFZ file loaded: " << sfz_file << std::endl;
-            int num_regions = sfizz_get_num_regions(synth);
-            std::cout << "Number of regions loaded: " << num_regions << std::endl;
-
-            if (num_regions == 0) {
-                std::cerr << "WARNING: No regions loaded! This usually means:" << std::endl;
-                std::cerr << "  - Sample files referenced in the SFZ couldn't be found" << std::endl;
-                std::cerr << "  - Sample paths are relative to the SFZ file location" << std::endl;
-                std::cerr << "  - Check that sample files exist relative to: " << sfz_file << std::endl;
-                error_message = "No samples loaded\nCheck SFZ paths";
-            }
-        }
+        // Note: Note suppression and MIDI pad files are loaded by samplecrate_engine_load_rsx()
     }
 
     // Enumerate audio output devices
@@ -2508,40 +2227,35 @@ int main(int argc, char* argv[]) {
                         // Check if it's an RSX file
                         size_t len = strlen(path);
                         if (len > 4 && (strcmp(path + len - 4, ".rsx") == 0 || strcmp(path + len - 4, ".RSX") == 0)) {
-                            // Create RSX structure if not exists
-                            if (!rsx) {
-                                rsx = samplecrate_rsx_create();
+                            // Load RSX file using engine
+                            printf("[File Browser] Loading RSX: %s\n", path);
+
+                            // Stop all MIDI playback before reloading
+                            if (midi_pad_player) {
+                                midi_file_pad_player_stop_all(midi_pad_player);
+                            }
+                            if (sequence_manager) {
+                                medness_performance_stop_all(sequence_manager);
                             }
 
-                            // Load the RSX file
-                            if (rsx && samplecrate_rsx_load(rsx, path) == 0) {
+                            // Pause audio device during reload to avoid accessing freed synths
+                            if (current_audio_device_id != 0) {
+                                SDL_PauseAudioDevice(current_audio_device_id, 1);
+                            }
+
+                            // Load the RSX (this can take a while, but audio is paused)
+                            int load_result = samplecrate_engine_load_rsx(engine, path);
+
+                            // Resume audio device
+                            if (current_audio_device_id != 0) {
+                                SDL_PauseAudioDevice(current_audio_device_id, 0);
+                            }
+
+                            if (load_result == 0) {
                                 printf("[File Browser] Successfully loaded: %s\n", path);
                                 rsx_file_path = path;  // Update current file path
 
-                                // Reload all programs
-                                for (int i = 0; i < rsx->num_programs; i++) {
-                                    reload_program(i);
-                                }
-                                load_note_suppression_from_rsx();
                                 reload_sequences();  // Load sequences from RSX
-                                current_program = 0;
-
-                                // Load MIDI files for all configured pads
-                                if (midi_pad_player) {
-                                    printf("[File Browser] Loading MIDI files for pads...\n");
-                                    for (int i = 0; i < rsx->num_pads && i < RSX_MAX_NOTE_PADS; i++) {
-                                        if (rsx->pads[i].midi_file[0] != '\0') {
-                                            char midi_path[512];
-                                            samplecrate_rsx_get_sfz_path(rsx_file_path.c_str(), rsx->pads[i].midi_file, midi_path, sizeof(midi_path));
-
-                                            if (midi_file_pad_player_load(midi_pad_player, i, midi_path, &midi_pad_indices[i]) == 0) {
-                                                printf("  Pad %d: Loaded MIDI file %s\n", i + 1, midi_path);
-                                            } else {
-                                                printf("  Pad %d: Failed to load MIDI file %s\n", i + 1, midi_path);
-                                            }
-                                        }
-                                    }
-                                }
 
                                 // Exit browse mode after successful load
                                 file_browser_mode = false;
@@ -2842,7 +2556,7 @@ int main(int argc, char* argv[]) {
                                 }
 
                                 // Auto-reload the program
-                                reload_program(i);
+                                samplecrate_engine_reload_program(engine, i);
                             }
                             ImGui::PopItemWidth();
                         }
@@ -2893,7 +2607,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after editing finished
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after editing finished
                                 }
                                 ImGui::PopItemWidth();
 
@@ -2905,7 +2619,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after slider released
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after slider released
                                 } else {
                                     sample->key_low = note_low;  // Update value while dragging
                                 }
@@ -2918,7 +2632,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after slider released
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after slider released
                                 } else {
                                     sample->key_high = note_high;  // Update value while dragging
                                 }
@@ -2931,7 +2645,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after slider released
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after slider released
                                 } else {
                                     sample->root_key = root_key;  // Update value while dragging
                                 }
@@ -2941,7 +2655,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);
+                                    samplecrate_engine_reload_program(engine, i);
                                 }
                                 ImGui::SameLine();
                                 ImGui::Text("(pitch center)");
@@ -2951,7 +2665,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after slider released
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after slider released
                                 }
 
                                 if (ImGui::Button("Remove")) {
@@ -2963,7 +2677,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(i);  // Auto-reload after removing sample
+                                    samplecrate_engine_reload_program(engine, i);  // Auto-reload after removing sample
                                 }
 
                                 ImGui::PopID();
@@ -3632,7 +3346,7 @@ int main(int argc, char* argv[]) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }
-                                    reload_program(prog_idx);
+                                    samplecrate_engine_reload_program(engine, prog_idx);
                                 }
                                 ImGui::PopItemWidth();
 
@@ -3642,7 +3356,7 @@ int main(int argc, char* argv[]) {
                                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(query sfizz)");
 
                                 if (ImGui::Button("Reload SFZ")) {
-                                    reload_program(prog_idx);
+                                    samplecrate_engine_reload_program(engine, prog_idx);
                                 }
                             } else {
                                 // Samples mode
@@ -3730,7 +3444,7 @@ int main(int argc, char* argv[]) {
 
                             // ACTIONS
                             if (ImGui::Button("Reload Program")) {
-                                reload_program(prog_idx);
+                                samplecrate_engine_reload_program(engine, prog_idx);
                             }
                             ImGui::SameLine();
                             if (ImGui::Button("Delete Program")) {
@@ -6109,25 +5823,11 @@ int main(int argc, char* argv[]) {
     }
 
     // Safely destroy synths
-    {
-        std::lock_guard<std::mutex> lock(synth_mutex);
-
-        // If we loaded multiple programs, free all program synths
-        if (rsx && rsx->num_programs > 0) {
-            for (int i = 0; i < rsx->num_programs; i++) {
-                if (program_synths[i]) {
-                    sfizz_free(program_synths[i]);
-                    program_synths[i] = nullptr;
-                }
-            }
-            synth = nullptr;  // Was pointing to one of the program synths
-        } else {
-            // Single synth mode
-            if (synth) {
-                sfizz_free(synth);
-                synth = nullptr;
-            }
-        }
+    // Cleanup engine (frees all synths, RSX, midi_pad_player, effects)
+    if (engine) {
+        samplecrate_engine_destroy(engine);
+        engine = nullptr;
+        // Note: synth, program_synths, rsx, midi_pad_player, effects are all owned by engine
     }
 
     // Cleanup MIDI and input mappings
@@ -6135,23 +5835,10 @@ int main(int argc, char* argv[]) {
     if (input_mappings) {
         input_mappings_destroy(input_mappings);
     }
-    if (rsx) {
-        samplecrate_rsx_destroy(rsx);
-    }
     if (lcd_display) {
         lcd_destroy(lcd_display);
     }
-    if (effects_master) {
-        regroove_effects_destroy(effects_master);
-    }
-    for (int i = 0; i < 4; i++) {
-        if (effects_program[i]) {
-            regroove_effects_destroy(effects_program[i]);
-        }
-    }
-    if (midi_pad_player) {
-        midi_file_pad_player_destroy(midi_pad_player);
-    }
+    // Note: effects_master, effects_program, and midi_pad_player are freed by engine
     if (sequence_manager) {
         medness_performance_destroy(sequence_manager);
     }

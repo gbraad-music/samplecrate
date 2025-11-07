@@ -33,7 +33,7 @@ SamplecrateEngine* samplecrate_engine_create(MednessSequencer* sequencer) {
     engine->effects_master = nullptr;
     engine->current_program = 0;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         engine->program_synths[i] = nullptr;
         engine->effects_program[i] = nullptr;
     }
@@ -66,7 +66,7 @@ SamplecrateEngine* samplecrate_engine_create(MednessSequencer* sequencer) {
 
     // Create effects
     engine->effects_master = regroove_effects_create();
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         engine->effects_program[i] = regroove_effects_create();
     }
 
@@ -85,7 +85,7 @@ void samplecrate_engine_destroy(SamplecrateEngine* engine) {
     if (engine->synth) {
         sfizz_free(engine->synth);
     }
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         if (engine->program_synths[i]) {
             sfizz_free(engine->program_synths[i]);
         }
@@ -100,7 +100,7 @@ void samplecrate_engine_destroy(SamplecrateEngine* engine) {
     if (engine->effects_master) {
         regroove_effects_destroy(engine->effects_master);
     }
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
         if (engine->effects_program[i]) {
             regroove_effects_destroy(engine->effects_program[i]);
         }
@@ -250,6 +250,16 @@ int samplecrate_engine_load_rsx(SamplecrateEngine* engine, const char* rsx_path)
         engine->rsx = samplecrate_rsx_create();
     }
 
+    // Clean up ALL existing program synths before loading new file
+    // (in case the new file has fewer programs than the old one)
+    std::cout << "Cleaning up existing programs..." << std::endl;
+    for (int i = 0; i < RSX_MAX_PROGRAMS; i++) {
+        if (engine->program_synths[i]) {
+            sfizz_free(engine->program_synths[i]);
+            engine->program_synths[i] = nullptr;
+        }
+    }
+
     // Load the RSX file
     if (samplecrate_rsx_load(engine->rsx, rsx_path) != 0) {
         std::cerr << "Failed to load RSX file: " << rsx_path << std::endl;
@@ -259,7 +269,7 @@ int samplecrate_engine_load_rsx(SamplecrateEngine* engine, const char* rsx_path)
     std::cout << "Loaded RSX file: " << rsx_path << std::endl;
     engine->rsx_file_path = rsx_path;
 
-    // Reload all programs
+    // Reload all programs from the new file
     for (int i = 0; i < engine->rsx->num_programs; i++) {
         samplecrate_engine_reload_program(engine, i);
     }
@@ -286,7 +296,10 @@ int samplecrate_engine_load_rsx(SamplecrateEngine* engine, const char* rsx_path)
 
     // Reset to program 0
     engine->current_program = 0;
-    engine->synth = engine->program_synths[0];
+    if (engine->program_synths[0]) {
+        engine->synth = engine->program_synths[0];
+    }
+    // Note: if program_synths[0] is NULL, engine->synth retains the default synth created during engine init
 
     return 0;
 }
