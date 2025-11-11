@@ -227,6 +227,196 @@ size_t sysex_build_trigger_pad(uint8_t target_device_id, uint8_t pad_index,
     return 6;
 }
 
+// --- Effects Control Functions ---
+
+size_t sysex_build_fx_effect_get(uint8_t target_device_id,
+                                  uint8_t program_id,
+                                  uint8_t effect_id,
+                                  uint8_t *buffer, size_t buffer_size) {
+    if (!buffer || buffer_size < 7) return 0;
+
+    buffer[0] = SYSEX_START;
+    buffer[1] = SYSEX_MANUFACTURER_ID;
+    buffer[2] = target_device_id & 0x7F;
+    buffer[3] = SYSEX_CMD_FX_EFFECT_GET;
+    buffer[4] = program_id & 0x7F;
+    buffer[5] = effect_id & 0x7F;
+    buffer[6] = SYSEX_END;
+
+    return 7;
+}
+
+size_t sysex_build_fx_effect_set(uint8_t target_device_id,
+                                  uint8_t program_id,
+                                  uint8_t effect_id,
+                                  uint8_t enabled,
+                                  const uint8_t *params,
+                                  size_t param_count,
+                                  uint8_t *buffer, size_t buffer_size) {
+    if (!buffer || !params) return 0;
+
+    // Calculate required size: F0 7D <dev> <cmd> <prog> <effect> <enabled> <params...> F7
+    size_t required = 8 + param_count;
+    if (buffer_size < required) return 0;
+
+    size_t pos = 0;
+    buffer[pos++] = SYSEX_START;
+    buffer[pos++] = SYSEX_MANUFACTURER_ID;
+    buffer[pos++] = target_device_id & 0x7F;
+    buffer[pos++] = SYSEX_CMD_FX_EFFECT_SET;
+    buffer[pos++] = program_id & 0x7F;
+    buffer[pos++] = effect_id & 0x7F;
+    buffer[pos++] = enabled ? 1 : 0;
+
+    // Copy parameters
+    for (size_t i = 0; i < param_count; i++) {
+        buffer[pos++] = params[i] & 0x7F;
+    }
+
+    buffer[pos++] = SYSEX_END;
+
+    return pos;
+}
+
+size_t sysex_build_fx_get_all_state(uint8_t target_device_id,
+                                     uint8_t program_id,
+                                     uint8_t *buffer, size_t buffer_size) {
+    if (!buffer || buffer_size < 6) return 0;
+
+    buffer[0] = SYSEX_START;
+    buffer[1] = SYSEX_MANUFACTURER_ID;
+    buffer[2] = target_device_id & 0x7F;
+    buffer[3] = SYSEX_CMD_FX_GET_ALL_STATE;
+    buffer[4] = program_id & 0x7F;
+    buffer[5] = SYSEX_END;
+
+    return 6;
+}
+
+size_t sysex_build_fx_state_response(uint8_t target_device_id,
+                                      uint8_t program_id,
+                                      uint8_t version,
+                                      uint8_t fx_route,
+                                      uint8_t enable_flags,
+                                      const uint8_t *distortion_params,  // drive, mix
+                                      const uint8_t *filter_params,      // cutoff, resonance
+                                      const uint8_t *eq_params,          // low, mid, high
+                                      const uint8_t *compressor_params,  // threshold, ratio, attack, release, makeup
+                                      const uint8_t *delay_params,       // time, feedback, mix
+                                      uint8_t *buffer, size_t buffer_size) {
+    if (!buffer) return 0;
+    if (!distortion_params || !filter_params || !eq_params || !compressor_params || !delay_params) return 0;
+
+    // Fixed size: F0 7D <dev> <cmd> <32 data bytes> F7 = 37 bytes
+    const size_t required = 37;
+    if (buffer_size < required) return 0;
+
+    size_t pos = 0;
+    buffer[pos++] = SYSEX_START;
+    buffer[pos++] = SYSEX_MANUFACTURER_ID;
+    buffer[pos++] = target_device_id & 0x7F;
+    buffer[pos++] = SYSEX_CMD_FX_STATE_RESPONSE;
+
+    // 32-byte data section
+    buffer[pos++] = program_id & 0x7F;      // Byte 0
+    buffer[pos++] = version & 0x7F;         // Byte 1
+    buffer[pos++] = fx_route & 0x7F;        // Byte 2
+    buffer[pos++] = enable_flags & 0x7F;    // Byte 3
+
+    // Distortion (bytes 4-5)
+    buffer[pos++] = distortion_params[0] & 0x7F;  // drive
+    buffer[pos++] = distortion_params[1] & 0x7F;  // mix
+
+    // Filter (bytes 6-7)
+    buffer[pos++] = filter_params[0] & 0x7F;  // cutoff
+    buffer[pos++] = filter_params[1] & 0x7F;  // resonance
+
+    // EQ (bytes 8-10)
+    buffer[pos++] = eq_params[0] & 0x7F;  // low
+    buffer[pos++] = eq_params[1] & 0x7F;  // mid
+    buffer[pos++] = eq_params[2] & 0x7F;  // high
+
+    // Compressor (bytes 11-15)
+    buffer[pos++] = compressor_params[0] & 0x7F;  // threshold
+    buffer[pos++] = compressor_params[1] & 0x7F;  // ratio
+    buffer[pos++] = compressor_params[2] & 0x7F;  // attack
+    buffer[pos++] = compressor_params[3] & 0x7F;  // release
+    buffer[pos++] = compressor_params[4] & 0x7F;  // makeup
+
+    // Delay (bytes 16-18)
+    buffer[pos++] = delay_params[0] & 0x7F;  // time
+    buffer[pos++] = delay_params[1] & 0x7F;  // feedback
+    buffer[pos++] = delay_params[2] & 0x7F;  // mix
+
+    // Reserved (bytes 19-31): 13 bytes
+    for (int i = 0; i < 13; i++) {
+        buffer[pos++] = 0x00;
+    }
+
+    buffer[pos++] = SYSEX_END;
+
+    return pos;
+}
+
+int sysex_parse_fx_state_response(const uint8_t *data, size_t data_len,
+                                   uint8_t *out_program_id,
+                                   uint8_t *out_version,
+                                   uint8_t *out_fx_route,
+                                   uint8_t *out_enable_flags,
+                                   uint8_t *out_distortion_params,  // 2 bytes
+                                   uint8_t *out_filter_params,      // 2 bytes
+                                   uint8_t *out_eq_params,          // 3 bytes
+                                   uint8_t *out_compressor_params,  // 5 bytes
+                                   uint8_t *out_delay_params) {     // 3 bytes
+    // Minimum: 32 bytes
+    if (!data || data_len < 32) return 0;
+
+    // Extract header
+    if (out_program_id) *out_program_id = data[0];
+    if (out_version) *out_version = data[1];
+    if (out_fx_route) *out_fx_route = data[2];
+    if (out_enable_flags) *out_enable_flags = data[3];
+
+    // Extract distortion (bytes 4-5)
+    if (out_distortion_params) {
+        out_distortion_params[0] = data[4];  // drive
+        out_distortion_params[1] = data[5];  // mix
+    }
+
+    // Extract filter (bytes 6-7)
+    if (out_filter_params) {
+        out_filter_params[0] = data[6];  // cutoff
+        out_filter_params[1] = data[7];  // resonance
+    }
+
+    // Extract EQ (bytes 8-10)
+    if (out_eq_params) {
+        out_eq_params[0] = data[8];   // low
+        out_eq_params[1] = data[9];   // mid
+        out_eq_params[2] = data[10];  // high
+    }
+
+    // Extract compressor (bytes 11-15)
+    if (out_compressor_params) {
+        out_compressor_params[0] = data[11];  // threshold
+        out_compressor_params[1] = data[12];  // ratio
+        out_compressor_params[2] = data[13];  // attack
+        out_compressor_params[3] = data[14];  // release
+        out_compressor_params[4] = data[15];  // makeup
+    }
+
+    // Extract delay (bytes 16-18)
+    if (out_delay_params) {
+        out_delay_params[0] = data[16];  // time
+        out_delay_params[1] = data[17];  // feedback
+        out_delay_params[2] = data[18];  // mix
+    }
+
+    // Note: Reserved bytes (19-31) are ignored
+
+    return 1;
+}
+
 // --- Helper Functions ---
 
 const char* sysex_command_name(SysExCommand cmd) {
@@ -242,6 +432,10 @@ const char* sysex_command_name(SysExCommand cmd) {
         case SYSEX_CMD_SET_POSITION:   return "SET_POSITION";
         case SYSEX_CMD_SET_BPM:        return "SET_BPM";
         case SYSEX_CMD_TRIGGER_PAD:    return "TRIGGER_PAD";
+        case SYSEX_CMD_FX_EFFECT_GET:  return "FX_EFFECT_GET";
+        case SYSEX_CMD_FX_EFFECT_SET:  return "FX_EFFECT_SET";
+        case SYSEX_CMD_FX_GET_ALL_STATE: return "FX_GET_ALL_STATE";
+        case SYSEX_CMD_FX_STATE_RESPONSE: return "FX_STATE_RESPONSE";
         default:                       return "UNKNOWN";
     }
 }

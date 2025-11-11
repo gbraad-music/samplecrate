@@ -38,7 +38,23 @@ typedef enum {
     SYSEX_CMD_SET_POSITION      = 0x40,  // Jump to position
     SYSEX_CMD_SET_BPM           = 0x41,  // Set tempo
     SYSEX_CMD_TRIGGER_PAD       = 0x50,  // Trigger a pad action
+    // Effects control (per-program)
+    SYSEX_CMD_FX_EFFECT_GET     = 0x70,  // Get effect parameters by effect ID
+    SYSEX_CMD_FX_EFFECT_SET     = 0x71,  // Set effect parameters by effect ID
+    SYSEX_CMD_FX_GET_ALL_STATE  = 0x7E,  // Request complete effects state
+    SYSEX_CMD_FX_STATE_RESPONSE = 0x7F,  // Complete effects state response
 } SysExCommand;
+
+// Effect IDs for FX_EFFECT_GET/SET commands
+typedef enum {
+    SYSEX_FX_DISTORTION = 0x00,  // Distortion (drive, mix)
+    SYSEX_FX_FILTER     = 0x01,  // Filter (cutoff, resonance)
+    SYSEX_FX_EQ         = 0x02,  // EQ (low, mid, high)
+    SYSEX_FX_COMPRESSOR = 0x03,  // Compressor (threshold, ratio, attack, release, makeup)
+    SYSEX_FX_DELAY      = 0x04,  // Delay (time, feedback, mix)
+    SYSEX_FX_RESERVED_1 = 0x05,  // Reserved for future effect
+    SYSEX_FX_RESERVED_2 = 0x06,  // Reserved for future effect
+} SysExEffectID;
 
 // SysEx message callback
 // Called when a valid Regroove SysEx message is received
@@ -116,6 +132,84 @@ size_t sysex_build_set_bpm(uint8_t target_device_id, uint16_t bpm,
 // pad_index: pad number (0-31)
 size_t sysex_build_trigger_pad(uint8_t target_device_id, uint8_t pad_index,
                                 uint8_t *buffer, size_t buffer_size);
+
+// --- Effects Control Functions ---
+
+// Build FX_EFFECT_GET message
+// Requests effect parameters for a specific effect ID on a program
+// program_id: Program/pad ID (0-31 for samplecrate pads)
+// effect_id: SYSEX_FX_DISTORTION (0x00) through SYSEX_FX_DELAY (0x04)
+// Response: Device sends FX_EFFECT_SET message with current parameters
+size_t sysex_build_fx_effect_get(uint8_t target_device_id,
+                                  uint8_t program_id,
+                                  uint8_t effect_id,
+                                  uint8_t *buffer, size_t buffer_size);
+
+// Build FX_EFFECT_SET message
+// Sets effect parameters for a specific effect ID on a program
+// program_id: Program/pad ID (0-31 for samplecrate pads)
+// effect_id: Effect to control (0x00-0x06)
+// enabled: 0 = disabled, 1 = enabled
+// params: Effect-specific parameters (see REGROOVE_EFFECTS_SYSEX.md)
+// param_count: Number of parameters (2-5 depending on effect)
+// Variable-length: parameter count depends on effect_id
+// - DISTORTION (0x00): 2 params (drive, mix)
+// - FILTER (0x01): 2 params (cutoff, resonance)
+// - EQ (0x02): 3 params (low, mid, high)
+// - COMPRESSOR (0x03): 5 params (threshold, ratio, attack, release, makeup)
+// - DELAY (0x04): 3 params (time, feedback, mix)
+size_t sysex_build_fx_effect_set(uint8_t target_device_id,
+                                  uint8_t program_id,
+                                  uint8_t effect_id,
+                                  uint8_t enabled,
+                                  const uint8_t *params,
+                                  size_t param_count,
+                                  uint8_t *buffer, size_t buffer_size);
+
+// Build FX_GET_ALL_STATE message
+// Requests complete effects state for a program
+// program_id: Program/pad ID (0-31 for samplecrate pads)
+size_t sysex_build_fx_get_all_state(uint8_t target_device_id,
+                                     uint8_t program_id,
+                                     uint8_t *buffer, size_t buffer_size);
+
+// Build FX_STATE_RESPONSE message
+// Sends complete effects state (32 bytes fixed size, version 1)
+// program_id: Program/pad ID (0-31)
+// version: Format version (0x01)
+// fx_route: FX routing (not used in samplecrate, always per-program)
+// enable_flags: Bit-packed enable flags (bit 0=distortion, 1=filter, 2=EQ, 3=compressor, 4=delay)
+// distortion_params: 2 bytes (drive, mix)
+// filter_params: 2 bytes (cutoff, resonance)
+// eq_params: 3 bytes (low, mid, high)
+// compressor_params: 5 bytes (threshold, ratio, attack, release, makeup)
+// delay_params: 3 bytes (time, feedback, mix)
+size_t sysex_build_fx_state_response(uint8_t target_device_id,
+                                      uint8_t program_id,
+                                      uint8_t version,
+                                      uint8_t fx_route,
+                                      uint8_t enable_flags,
+                                      const uint8_t *distortion_params,  // drive, mix
+                                      const uint8_t *filter_params,      // cutoff, resonance
+                                      const uint8_t *eq_params,          // low, mid, high
+                                      const uint8_t *compressor_params,  // threshold, ratio, attack, release, makeup
+                                      const uint8_t *delay_params,       // time, feedback, mix
+                                      uint8_t *buffer, size_t buffer_size);
+
+// Parse FX_STATE_RESPONSE message
+// Extracts complete effects state from received message
+// Returns 1 on success, 0 on failure
+// All param buffers must be allocated before calling (see sizes above)
+int sysex_parse_fx_state_response(const uint8_t *data, size_t data_len,
+                                   uint8_t *out_program_id,
+                                   uint8_t *out_version,
+                                   uint8_t *out_fx_route,
+                                   uint8_t *out_enable_flags,
+                                   uint8_t *out_distortion_params,  // 2 bytes
+                                   uint8_t *out_filter_params,      // 2 bytes
+                                   uint8_t *out_eq_params,          // 3 bytes
+                                   uint8_t *out_compressor_params,  // 5 bytes
+                                   uint8_t *out_delay_params);      // 3 bytes
 
 // --- Helper Functions ---
 
