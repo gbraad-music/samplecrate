@@ -32,12 +32,17 @@ typedef enum {
     SYSEX_CMD_PLAY              = 0x20,  // Start playback
     SYSEX_CMD_STOP              = 0x21,  // Stop playback
     SYSEX_CMD_PAUSE             = 0x22,  // Pause/Continue
-    SYSEX_CMD_CHANNEL_MUTE      = 0x30,  // Mute/unmute channel
-    SYSEX_CMD_CHANNEL_SOLO      = 0x31,  // Solo/unsolo channel
-    SYSEX_CMD_CHANNEL_VOLUME    = 0x32,  // Set channel volume
+    SYSEX_CMD_CHANNEL_MUTE      = 0x30,  // Mute/unmute channel/program
+    SYSEX_CMD_CHANNEL_SOLO      = 0x31,  // Solo/unsolo channel/program
+    SYSEX_CMD_CHANNEL_VOLUME    = 0x32,  // Set channel/program volume
+    SYSEX_CMD_MASTER_VOLUME     = 0x33,  // Set master output volume
+    SYSEX_CMD_MASTER_MUTE       = 0x34,  // Set master mute
+    SYSEX_CMD_CHANNEL_FX_ENABLE = 0x38,  // Enable/disable FX chain per channel/program
     SYSEX_CMD_SET_POSITION      = 0x40,  // Jump to position
     SYSEX_CMD_SET_BPM           = 0x41,  // Set tempo
     SYSEX_CMD_TRIGGER_PAD       = 0x50,  // Trigger a pad action
+    SYSEX_CMD_CHANNEL_PANNING   = 0x58,  // Set channel/program panning
+    SYSEX_CMD_MASTER_PANNING    = 0x59,  // Set master panning
     // Effects control (per-program)
     SYSEX_CMD_FX_EFFECT_GET     = 0x70,  // Get effect parameters by effect ID
     SYSEX_CMD_FX_EFFECT_SET     = 0x71,  // Set effect parameters by effect ID

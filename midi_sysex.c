@@ -429,9 +429,14 @@ const char* sysex_command_name(SysExCommand cmd) {
         case SYSEX_CMD_CHANNEL_MUTE:   return "CHANNEL_MUTE";
         case SYSEX_CMD_CHANNEL_SOLO:   return "CHANNEL_SOLO";
         case SYSEX_CMD_CHANNEL_VOLUME: return "CHANNEL_VOLUME";
+        case SYSEX_CMD_MASTER_VOLUME:  return "MASTER_VOLUME";
+        case SYSEX_CMD_MASTER_MUTE:    return "MASTER_MUTE";
+        case SYSEX_CMD_CHANNEL_FX_ENABLE: return "CHANNEL_FX_ENABLE";
         case SYSEX_CMD_SET_POSITION:   return "SET_POSITION";
         case SYSEX_CMD_SET_BPM:        return "SET_BPM";
         case SYSEX_CMD_TRIGGER_PAD:    return "TRIGGER_PAD";
+        case SYSEX_CMD_CHANNEL_PANNING: return "CHANNEL_PANNING";
+        case SYSEX_CMD_MASTER_PANNING: return "MASTER_PANNING";
         case SYSEX_CMD_FX_EFFECT_GET:  return "FX_EFFECT_GET";
         case SYSEX_CMD_FX_EFFECT_SET:  return "FX_EFFECT_SET";
         case SYSEX_CMD_FX_GET_ALL_STATE: return "FX_GET_ALL_STATE";

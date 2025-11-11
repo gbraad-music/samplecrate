@@ -904,6 +904,146 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             printf("[SysEx] PING received\n");
             break;
 
+        case SYSEX_CMD_CHANNEL_VOLUME: {
+            // F0 7D <dev> 32 <program_id> <volume> F7
+            if (data_len < 2) {
+                printf("[SysEx] CHANNEL_VOLUME: insufficient data\n");
+                break;
+            }
+
+            uint8_t program_id = data[0];
+            uint8_t volume = data[1];
+
+            if (program_id >= RSX_MAX_PROGRAMS) {
+                printf("[SysEx] CHANNEL_VOLUME: invalid program ID %d\n", program_id);
+                break;
+            }
+
+            if (engine) {
+                mixer.program_volumes[program_id] = volume / 127.0f;
+                printf("[SysEx] CHANNEL_VOLUME: program %d volume set to %.2f\n",
+                       program_id, mixer.program_volumes[program_id]);
+            }
+            break;
+        }
+
+        case SYSEX_CMD_CHANNEL_PANNING: {
+            // F0 7D <dev> 58 <program_id> <pan> F7
+            if (data_len < 2) {
+                printf("[SysEx] CHANNEL_PANNING: insufficient data\n");
+                break;
+            }
+
+            uint8_t program_id = data[0];
+            uint8_t pan = data[1];
+
+            if (program_id >= RSX_MAX_PROGRAMS) {
+                printf("[SysEx] CHANNEL_PANNING: invalid program ID %d\n", program_id);
+                break;
+            }
+
+            if (engine) {
+                mixer.program_pans[program_id] = pan / 127.0f;
+                printf("[SysEx] CHANNEL_PANNING: program %d pan set to %.2f\n",
+                       program_id, mixer.program_pans[program_id]);
+            }
+            break;
+        }
+
+        case SYSEX_CMD_CHANNEL_MUTE: {
+            // F0 7D <dev> 30 <program_id> <mute> F7
+            if (data_len < 2) {
+                printf("[SysEx] CHANNEL_MUTE: insufficient data\n");
+                break;
+            }
+
+            uint8_t program_id = data[0];
+            uint8_t mute = data[1];
+
+            if (program_id >= RSX_MAX_PROGRAMS) {
+                printf("[SysEx] CHANNEL_MUTE: invalid program ID %d\n", program_id);
+                break;
+            }
+
+            if (engine) {
+                mixer.program_mutes[program_id] = mute ? 1 : 0;
+                printf("[SysEx] CHANNEL_MUTE: program %d %s\n",
+                       program_id, mute ? "muted" : "unmuted");
+            }
+            break;
+        }
+
+        case SYSEX_CMD_CHANNEL_FX_ENABLE: {
+            // F0 7D <dev> 38 <program_id> <enable> F7
+            if (data_len < 2) {
+                printf("[SysEx] CHANNEL_FX_ENABLE: insufficient data\n");
+                break;
+            }
+
+            uint8_t program_id = data[0];
+            uint8_t enable = data[1];
+
+            if (program_id >= RSX_MAX_PROGRAMS) {
+                printf("[SysEx] CHANNEL_FX_ENABLE: invalid program ID %d\n", program_id);
+                break;
+            }
+
+            if (engine) {
+                mixer.program_fx_enable[program_id] = enable ? 1 : 0;
+                printf("[SysEx] CHANNEL_FX_ENABLE: program %d FX %s\n",
+                       program_id, enable ? "enabled" : "disabled");
+            }
+            break;
+        }
+
+        case SYSEX_CMD_MASTER_VOLUME: {
+            // F0 7D <dev> 33 <volume> F7
+            if (data_len < 1) {
+                printf("[SysEx] MASTER_VOLUME: insufficient data\n");
+                break;
+            }
+
+            uint8_t volume = data[0];
+
+            if (engine) {
+                mixer.master_volume = volume / 127.0f;
+                printf("[SysEx] MASTER_VOLUME: set to %.2f\n", mixer.master_volume);
+            }
+            break;
+        }
+
+        case SYSEX_CMD_MASTER_PANNING: {
+            // F0 7D <dev> 59 <pan> F7
+            if (data_len < 1) {
+                printf("[SysEx] MASTER_PANNING: insufficient data\n");
+                break;
+            }
+
+            uint8_t pan = data[0];
+
+            if (engine) {
+                mixer.master_pan = pan / 127.0f;
+                printf("[SysEx] MASTER_PANNING: set to %.2f\n", mixer.master_pan);
+            }
+            break;
+        }
+
+        case SYSEX_CMD_MASTER_MUTE: {
+            // F0 7D <dev> 34 <mute> F7
+            if (data_len < 1) {
+                printf("[SysEx] MASTER_MUTE: insufficient data\n");
+                break;
+            }
+
+            uint8_t mute = data[0];
+
+            if (engine) {
+                mixer.master_mute = mute ? 1 : 0;
+                printf("[SysEx] MASTER_MUTE: master %s\n", mute ? "muted" : "unmuted");
+            }
+            break;
+        }
+
         case SYSEX_CMD_FX_EFFECT_SET: {
             // F0 7D <dev> 71 <prog> <effect_id> <enabled> <params...> F7
             if (data_len < 3) {
