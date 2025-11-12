@@ -105,6 +105,6 @@ int midi_output_send_sysex(const unsigned char *msg, size_t msg_len) {
     }
 
     rtmidi_out_send_message(midi_out, msg, msg_len);
-    printf("[MIDI Output] Sent SysEx message (%zu bytes)\n", msg_len);
+    // Silent - SysEx messages sent frequently
     return 0;
 }

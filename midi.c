@@ -14,20 +14,11 @@ static void handle_midi_event(int device_id, double dt, const unsigned char *msg
 
     // Handle SysEx messages (0xF0 ... 0xF7)
     if (sz >= 5 && msg[0] == 0xF0) {
-        printf("[MIDI] SysEx message received (%zu bytes): F0", sz);
-        for (size_t i = 1; i < sz && i < 10; i++) {
-            printf(" %02X", msg[i]);
-        }
-        if (sz > 10) printf(" ...");
-        printf(" on MIDI port %d\n", device_id);
-
-        // Try to parse as Samplecrate SysEx message
+        // Try to parse as Samplecrate SysEx message (silently)
         if (sysex_parse_message(msg, sz)) {
             // Message was handled by SysEx subsystem
-            printf("[MIDI] SysEx message was handled\n");
             return;
         }
-        printf("[MIDI] SysEx message not recognized (not for us or wrong manufacturer)\n");
         // Otherwise, fall through to regular handling
     }
 

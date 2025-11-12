@@ -829,12 +829,7 @@ static uint64_t get_microseconds() {
 
 // SysEx callback for remote control
 void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data, size_t data_len, void *userdata) {
-    // Only log supported/handled commands (suppress UNKNOWN command spam)
-    const char* cmd_name = sysex_command_name(command);
-    if (strcmp(cmd_name, "UNKNOWN") != 0) {
-        printf("[SysEx] Received command: %s for device %d\n", cmd_name, device_id);
-    }
-
+    // Process SysEx commands (minimal logging)
     switch (command) {
         case SYSEX_CMD_FILE_LOAD: {
             if (data_len >= 2) {
@@ -843,7 +838,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                     char filename[256] = {0};
                     memcpy(filename, &data[1], filename_len);
                     filename[filename_len] = '\0';
-                    printf("[SysEx] Loading RSX file: %s\n", filename);
+                    printf("[SysEx] File load: %s\n", filename);
 
                     // If filename is not an absolute path, prepend the directory of the current RSX file
                     char full_path[1024];
@@ -1051,32 +1046,20 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
 
         case SYSEX_CMD_FX_EFFECT_SET: {
             // F0 7D <dev> 71 <prog> <effect_id> <enabled> <params...> F7
-            if (data_len < 3) {
-                printf("[SysEx] FX_EFFECT_SET: insufficient data (need at least 3 bytes)\n");
-                break;
-            }
+            if (data_len < 3) break;
 
             uint8_t program_id = data[0];
             uint8_t effect_id = data[1];
             uint8_t enabled = data[2];
 
-            if (program_id >= RSX_MAX_PROGRAMS) {
-                printf("[SysEx] FX_EFFECT_SET: invalid program ID %d (max %d)\n", program_id, RSX_MAX_PROGRAMS - 1);
-                break;
-            }
+            if (program_id >= RSX_MAX_PROGRAMS) break;
 
             RegrooveEffects* prog_fx = (program_id < RSX_MAX_PROGRAMS && engine) ? engine->effects_program[program_id] : nullptr;
-            if (!prog_fx) {
-                printf("[SysEx] FX_EFFECT_SET: program %d has no effects chain\n", program_id);
-                break;
-            }
+            if (!prog_fx) break;
 
             RegrooveEffects* fx = prog_fx;
             const uint8_t* params = &data[3];
             size_t param_count = data_len - 3;
-
-            printf("[SysEx] FX_EFFECT_SET: program=%d effect=0x%02X enabled=%d param_count=%zu\n",
-                   program_id, effect_id, enabled, param_count);
 
             // Apply parameters based on effect ID
             switch (effect_id) {
@@ -1085,8 +1068,8 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         regroove_effects_set_distortion_enabled(fx, enabled);
                         regroove_effects_set_distortion_drive(fx, params[0] / 127.0f);
                         regroove_effects_set_distortion_mix(fx, params[1] / 127.0f);
-                        printf("[SysEx]   Distortion: enabled=%d drive=%.2f mix=%.2f\n",
-                               enabled, params[0] / 127.0f, params[1] / 127.0f);
+                        // printf("[SysEx]   Distortion: enabled=%d drive=%.2f mix=%.2f\n",
+                        //        enabled, params[0] / 127.0f, params[1] / 127.0f);
                     }
                     break;
 
@@ -1095,8 +1078,8 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         regroove_effects_set_filter_enabled(fx, enabled);
                         regroove_effects_set_filter_cutoff(fx, params[0] / 127.0f);
                         regroove_effects_set_filter_resonance(fx, params[1] / 127.0f);
-                        printf("[SysEx]   Filter: enabled=%d cutoff=%.2f resonance=%.2f\n",
-                               enabled, params[0] / 127.0f, params[1] / 127.0f);
+                        // printf("[SysEx]   Filter: enabled=%d cutoff=%.2f resonance=%.2f\n",
+                        //        enabled, params[0] / 127.0f, params[1] / 127.0f);
                     }
                     break;
 
@@ -1106,8 +1089,8 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         regroove_effects_set_eq_low(fx, params[0] / 127.0f);
                         regroove_effects_set_eq_mid(fx, params[1] / 127.0f);
                         regroove_effects_set_eq_high(fx, params[2] / 127.0f);
-                        printf("[SysEx]   EQ: enabled=%d low=%.2f mid=%.2f high=%.2f\n",
-                               enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f);
+                        // printf("[SysEx]   EQ: enabled=%d low=%.2f mid=%.2f high=%.2f\n",
+                        //        enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f);
                     }
                     break;
 
@@ -1119,9 +1102,9 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         regroove_effects_set_compressor_attack(fx, params[2] / 127.0f);
                         regroove_effects_set_compressor_release(fx, params[3] / 127.0f);
                         regroove_effects_set_compressor_makeup(fx, params[4] / 127.0f);
-                        printf("[SysEx]   Compressor: enabled=%d threshold=%.2f ratio=%.2f attack=%.2f release=%.2f makeup=%.2f\n",
-                               enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f,
-                               params[3] / 127.0f, params[4] / 127.0f);
+                        // printf("[SysEx]   Compressor: enabled=%d threshold=%.2f ratio=%.2f attack=%.2f release=%.2f makeup=%.2f\n",
+                        //        enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f,
+                        //        params[3] / 127.0f, params[4] / 127.0f);
                     }
                     break;
 
@@ -1131,13 +1114,13 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         regroove_effects_set_delay_time(fx, params[0] / 127.0f);
                         regroove_effects_set_delay_feedback(fx, params[1] / 127.0f);
                         regroove_effects_set_delay_mix(fx, params[2] / 127.0f);
-                        printf("[SysEx]   Delay: enabled=%d time=%.2f feedback=%.2f mix=%.2f\n",
-                               enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f);
+                        // printf("[SysEx]   Delay: enabled=%d time=%.2f feedback=%.2f mix=%.2f\n",
+                        //        enabled, params[0] / 127.0f, params[1] / 127.0f, params[2] / 127.0f);
                     }
                     break;
 
                 default:
-                    printf("[SysEx] FX_EFFECT_SET: unknown effect ID 0x%02X\n", effect_id);
+                    // Silently ignore unknown effect IDs
                     break;
             }
             break;
@@ -1146,24 +1129,15 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
         case SYSEX_CMD_FX_EFFECT_GET: {
             // F0 7D <dev> 70 <prog> <effect_id> F7
             // Response: Send FX_EFFECT_SET with current values
-            if (data_len < 2) {
-                printf("[SysEx] FX_EFFECT_GET: insufficient data\n");
-                break;
-            }
+            if (data_len < 2) break;
 
             uint8_t program_id = data[0];
             uint8_t effect_id = data[1];
 
-            if (program_id >= RSX_MAX_PROGRAMS) {
-                printf("[SysEx] FX_EFFECT_GET: invalid program ID %d\n", program_id);
-                break;
-            }
+            if (program_id >= RSX_MAX_PROGRAMS) break;
 
             RegrooveEffects* prog_fx_get = (program_id < RSX_MAX_PROGRAMS && engine) ? engine->effects_program[program_id] : nullptr;
-            if (!prog_fx_get) {
-                printf("[SysEx] FX_EFFECT_GET: program %d has no effects chain\n", program_id);
-                break;
-            }
+            if (!prog_fx_get) break;
 
             RegrooveEffects* fx = prog_fx_get;
             uint8_t sysex_buffer[64];
@@ -1218,12 +1192,8 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                                                            enabled, params, param_count,
                                                            sysex_buffer, sizeof(sysex_buffer));
                 if (msg_len > 0) {
-                    // Send response via MIDI output
-                    if (midi_output_send_sysex(sysex_buffer, msg_len) == 0) {
-                        printf("[SysEx] FX_EFFECT_GET: sent %zu bytes response\n", msg_len);
-                    } else {
-                        printf("[SysEx] FX_EFFECT_GET: failed to send response (MIDI output not configured)\n");
-                    }
+                    // Send response via MIDI output (silently)
+                    midi_output_send_sysex(sysex_buffer, msg_len);
                 }
             }
             break;
@@ -1232,23 +1202,14 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
         case SYSEX_CMD_FX_GET_ALL_STATE: {
             // F0 7D <dev> 7E <prog> F7
             // Response: Send FX_STATE_RESPONSE with all effects state
-            if (data_len < 1) {
-                printf("[SysEx] FX_GET_ALL_STATE: insufficient data\n");
-                break;
-            }
+            if (data_len < 1) break;
 
             uint8_t program_id = data[0];
 
-            if (program_id >= RSX_MAX_PROGRAMS) {
-                printf("[SysEx] FX_GET_ALL_STATE: invalid program ID %d\n", program_id);
-                break;
-            }
+            if (program_id >= RSX_MAX_PROGRAMS) break;
 
             RegrooveEffects* prog_fx_all = (program_id < RSX_MAX_PROGRAMS && engine) ? engine->effects_program[program_id] : nullptr;
-            if (!prog_fx_all) {
-                printf("[SysEx] FX_GET_ALL_STATE: program %d has no effects chain\n", program_id);
-                break;
-            }
+            if (!prog_fx_all) break;
 
             RegrooveEffects* fx = prog_fx_all;
 
@@ -1294,18 +1255,18 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                                                            compressor_params, delay_params,
                                                            sysex_buffer, sizeof(sysex_buffer));
             if (msg_len > 0) {
-                // Send response via MIDI output
-                if (midi_output_send_sysex(sysex_buffer, msg_len) == 0) {
-                    printf("[SysEx] FX_GET_ALL_STATE: sent %zu bytes response\n", msg_len);
-                } else {
-                    printf("[SysEx] FX_GET_ALL_STATE: failed to send response (MIDI output not configured)\n");
-                }
+                // Send response via MIDI output (silently)
+                midi_output_send_sysex(sysex_buffer, msg_len);
             }
             break;
         }
 
+        case SYSEX_CMD_FX_STATE_RESPONSE:
+            // This is a response message (we sent it), silently ignore when received back
+            break;
+
         default:
-            // Silently ignore unhandled commands to reduce log spam
+            // Silently ignore unhandled/unknown commands
             break;
     }
 }
