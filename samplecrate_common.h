@@ -69,6 +69,7 @@ typedef struct {
     int midi_device_0;   // MIDI device 0 port (-1 = not configured)
     int midi_device_1;   // MIDI device 1 port (-1 = not configured)
     int midi_device_2;   // MIDI device 2 port (-1 = not configured)
+    int midi_output_device; // MIDI output device port (-1 = not configured)
     int midi_input_channel; // Global MIDI input channel filter (0 = Omni/all channels, 1-16 = specific channel)
     int audio_device;    // Audio output device (-1 = default)
     int expanded_pads;   // 0 = 16 pads, 1 = 32 pads

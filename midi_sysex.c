@@ -47,6 +47,7 @@ int sysex_parse_message(const uint8_t *msg, size_t msg_len) {
 
     // Check if message is for us (or broadcast)
     if (device_id != local_device_id && device_id != SYSEX_DEVICE_BROADCAST) {
+        printf("[SysEx] Message for device %d ignored (we are device %d)\n", device_id, local_device_id);
         return 0;  // Not for us
     }
 
@@ -54,9 +55,12 @@ int sysex_parse_message(const uint8_t *msg, size_t msg_len) {
     const uint8_t *data = (msg_len > 5) ? &msg[4] : NULL;
     size_t data_len = (msg_len > 5) ? (msg_len - 5) : 0;
 
-    // Only print if the message is actually for us
-    printf("[SysEx] Received %s for device %d (data_len=%zu)\n",
-           sysex_command_name((SysExCommand)command), device_id, data_len);
+    // Only print if the message is actually for us and it's not UNKNOWN
+    const char* cmd_name = sysex_command_name((SysExCommand)command);
+    if (strcmp(cmd_name, "UNKNOWN") != 0) {
+        printf("[SysEx] Received %s for device %d (data_len=%zu)\n",
+               cmd_name, device_id, data_len);
+    }
 
     // Call registered callback
     if (message_callback) {

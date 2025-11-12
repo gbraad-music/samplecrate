@@ -58,6 +58,7 @@ add_executable(samplecrate
     samplecrate_engine.cpp
     regroove_effects.c
     midi.c
+    midi_output.c
     input_mappings.c
     sfz_builder.c
     midi_sysex.c

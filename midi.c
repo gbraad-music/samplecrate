@@ -19,7 +19,7 @@ static void handle_midi_event(int device_id, double dt, const unsigned char *msg
             printf(" %02X", msg[i]);
         }
         if (sz > 10) printf(" ...");
-        printf("\n");
+        printf(" on MIDI port %d\n", device_id);
 
         // Try to parse as Samplecrate SysEx message
         if (sysex_parse_message(msg, sz)) {

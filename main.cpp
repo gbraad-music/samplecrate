@@ -34,6 +34,7 @@ extern "C" {
 #include "samplecrate_rsx.h"
 #include "regroove_effects.h"
 #include "midi.h"
+#include "midi_output.h"
 #include "input_mappings.h"
 #include "sfz_builder.h"
 #include "medness_sequencer.h"
@@ -828,7 +829,11 @@ static uint64_t get_microseconds() {
 
 // SysEx callback for remote control
 void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data, size_t data_len, void *userdata) {
-    printf("[SysEx] Received command: %s for device %d\n", sysex_command_name(command), device_id);
+    // Only log supported/handled commands (suppress UNKNOWN command spam)
+    const char* cmd_name = sysex_command_name(command);
+    if (strcmp(cmd_name, "UNKNOWN") != 0) {
+        printf("[SysEx] Received command: %s for device %d\n", cmd_name, device_id);
+    }
 
     switch (command) {
         case SYSEX_CMD_FILE_LOAD: {
@@ -1213,8 +1218,12 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                                                            enabled, params, param_count,
                                                            sysex_buffer, sizeof(sysex_buffer));
                 if (msg_len > 0) {
-                    // TODO: Send sysex_buffer via MIDI output
-                    printf("[SysEx] FX_EFFECT_GET: would send %zu bytes response\n", msg_len);
+                    // Send response via MIDI output
+                    if (midi_output_send_sysex(sysex_buffer, msg_len) == 0) {
+                        printf("[SysEx] FX_EFFECT_GET: sent %zu bytes response\n", msg_len);
+                    } else {
+                        printf("[SysEx] FX_EFFECT_GET: failed to send response (MIDI output not configured)\n");
+                    }
                 }
             }
             break;
@@ -1285,14 +1294,18 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                                                            compressor_params, delay_params,
                                                            sysex_buffer, sizeof(sysex_buffer));
             if (msg_len > 0) {
-                // TODO: Send sysex_buffer via MIDI output
-                printf("[SysEx] FX_GET_ALL_STATE: would send %zu bytes response\n", msg_len);
+                // Send response via MIDI output
+                if (midi_output_send_sysex(sysex_buffer, msg_len) == 0) {
+                    printf("[SysEx] FX_GET_ALL_STATE: sent %zu bytes response\n", msg_len);
+                } else {
+                    printf("[SysEx] FX_GET_ALL_STATE: failed to send response (MIDI output not configured)\n");
+                }
             }
             break;
         }
 
         default:
-            printf("[SysEx] Unhandled command: 0x%02X\n", command);
+            // Silently ignore unhandled commands to reduce log spam
             break;
     }
 }
@@ -2389,18 +2402,25 @@ int main(int argc, char* argv[]) {
         std::cout << "SysEx initialized (device ID: " << (int)sysex_get_device_id() << ")" << std::endl;
 
         if (midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES) == 0) {
-            std::cout << "MIDI initialized successfully" << std::endl;
+            std::cout << "MIDI input initialized successfully" << std::endl;
             if (midi_device_ports[0] >= 0) {
-                std::cout << "  Device 0: port " << midi_device_ports[0] << std::endl;
+                std::cout << "  Input Device 0: port " << midi_device_ports[0] << std::endl;
             }
             if (midi_device_ports[1] >= 0) {
-                std::cout << "  Device 1: port " << midi_device_ports[1] << std::endl;
+                std::cout << "  Input Device 1: port " << midi_device_ports[1] << std::endl;
             }
             if (midi_device_ports[2] >= 0) {
-                std::cout << "  Device 2: port " << midi_device_ports[2] << std::endl;
+                std::cout << "  Input Device 2: port " << midi_device_ports[2] << std::endl;
             }
         } else {
-            std::cout << "MIDI initialization failed, continuing without MIDI support" << std::endl;
+            std::cout << "MIDI input initialization failed, continuing without MIDI input support" << std::endl;
+        }
+
+        // Initialize MIDI output
+        if (config.midi_output_device >= 0 && midi_output_init(config.midi_output_device) == 0) {
+            std::cout << "MIDI output initialized on port " << config.midi_output_device << std::endl;
+        } else if (config.midi_output_device >= 0) {
+            std::cout << "MIDI output initialization failed" << std::endl;
         }
     } else {
         std::cout << "No MIDI ports found, continuing without MIDI support" << std::endl;
@@ -5946,6 +5966,65 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
+                // MIDI Output Device selection
+                ImGui::Text("MIDI Output Device:");
+                ImGui::PushItemWidth(300.0f);
+
+                // Get list of MIDI output ports
+                int num_output_ports = midi_output_list_ports();
+
+                // Get current selection from config
+                int selected_output_port = config.midi_output_device;
+
+                // Build preview label showing current selection
+                char preview_label_out[256];
+                if (selected_output_port == -1) {
+                    snprintf(preview_label_out, sizeof(preview_label_out), "Not configured");
+                } else {
+                    char port_name[128];
+                    if (midi_output_get_port_name(selected_output_port, port_name, sizeof(port_name)) == 0) {
+                        snprintf(preview_label_out, sizeof(preview_label_out), "Port %d: %s", selected_output_port, port_name);
+                    } else {
+                        snprintf(preview_label_out, sizeof(preview_label_out), "Port %d", selected_output_port);
+                    }
+                }
+
+                if (ImGui::BeginCombo("##midi_output_device", preview_label_out)) {
+                    if (ImGui::Selectable("Not configured", selected_output_port == -1)) {
+                        config.midi_output_device = -1;
+                        // Save config immediately
+                        samplecrate_config_save(&config, "samplecrate.ini");
+                        // Deinitialize MIDI output
+                        midi_output_deinit();
+                    }
+                    for (int i = 0; i < num_output_ports && i < 16; i++) {
+                        char port_name[128];
+                        if (midi_output_get_port_name(i, port_name, sizeof(port_name)) == 0) {
+                            char label[256];
+                            snprintf(label, sizeof(label), "Port %d: %s", i, port_name);
+                            if (ImGui::Selectable(label, selected_output_port == i)) {
+                                config.midi_output_device = i;
+                                // Save config immediately
+                                samplecrate_config_save(&config, "samplecrate.ini");
+                                // Reinitialize MIDI output with new configuration
+                                midi_output_deinit();
+                                if (midi_output_init(i) == 0) {
+                                    std::cout << "MIDI output reinitialized on port " << i << std::endl;
+                                } else {
+                                    std::cout << "Failed to reinitialize MIDI output" << std::endl;
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+
+                ImGui::Spacing();
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 // MIDI SYNC SETTINGS
                 ImGui::Text("MIDI CLOCK SYNC:");
                 ImGui::Spacing();
@@ -6447,6 +6526,7 @@ int main(int argc, char* argv[]) {
 
     // Cleanup MIDI and input mappings
     midi_deinit();
+    midi_output_deinit();
     if (input_mappings) {
         input_mappings_destroy(input_mappings);
     }

@@ -288,6 +288,7 @@ void samplecrate_config_init(SamplecrateConfig* config) {
     config->midi_device_0 = -1;  // Not configured
     config->midi_device_1 = -1;  // Not configured
     config->midi_device_2 = -1;  // Not configured
+    config->midi_output_device = -1;  // Not configured
     config->midi_input_channel = 0;  // Omni (all channels) by default
     config->audio_device = -1;   // Use default
     config->expanded_pads = 0;   // Normal 16 pads by default
@@ -391,6 +392,7 @@ int samplecrate_config_load(SamplecrateConfig* config, const char* filepath) {
             if (strcmp(key, "midi_device_0") == 0) config->midi_device_0 = atoi(value);
             else if (strcmp(key, "midi_device_1") == 0) config->midi_device_1 = atoi(value);
             else if (strcmp(key, "midi_device_2") == 0) config->midi_device_2 = atoi(value);
+            else if (strcmp(key, "midi_output_device") == 0) config->midi_output_device = atoi(value);
             else if (strcmp(key, "midi_input_channel") == 0) config->midi_input_channel = atoi(value);
             else if (strcmp(key, "audio_device") == 0) config->audio_device = atoi(value);
             else if (strcmp(key, "expanded_pads") == 0) config->expanded_pads = atoi(value);
@@ -456,6 +458,7 @@ int samplecrate_config_save(const SamplecrateConfig* config, const char* filepat
     fprintf(f, "midi_device_0=%d\n", config->midi_device_0);
     fprintf(f, "midi_device_1=%d\n", config->midi_device_1);
     fprintf(f, "midi_device_2=%d\n", config->midi_device_2);
+    fprintf(f, "midi_output_device=%d\n", config->midi_output_device);
     fprintf(f, "midi_input_channel=%d  ; 0 = Omni (all channels), 1-16 = specific channel\n", config->midi_input_channel);
     fprintf(f, "audio_device=%d\n", config->audio_device);
     fprintf(f, "expanded_pads=%d\n", config->expanded_pads);
