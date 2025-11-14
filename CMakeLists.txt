@@ -67,6 +67,9 @@ add_executable(samplecrate
     midi_file_player.cpp
     medness_sequence.cpp
     medness_performance.cpp
+    sequence_upload.cpp
+    sequence_rsx_manager.cpp
+    sequence_download.cpp
     ${IMGUI_SOURCES}
     ${MIDIFILE_SOURCES}
 )

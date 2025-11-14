@@ -48,6 +48,21 @@ typedef enum {
     SYSEX_CMD_FX_EFFECT_SET     = 0x71,  // Set effect parameters by effect ID
     SYSEX_CMD_FX_GET_ALL_STATE  = 0x7E,  // Request complete effects state
     SYSEX_CMD_FX_STATE_RESPONSE = 0x7F,  // Complete effects state response
+    // Sequence track upload/download and control (0x42-0x4D)
+    // FIXED: Moved from 0x80-0x8B which violated MIDI SysEx spec (bytes must be 0-127)
+    // Note: Each slot holds a single-track sequence assigned to a specific program
+    SYSEX_CMD_SEQUENCE_TRACK_UPLOAD            = 0x42,  // Upload track (subcommand: 0=START, 1=CHUNK, 2=COMPLETE)
+    SYSEX_CMD_SEQUENCE_TRACK_UPLOAD_RESPONSE   = 0x43,  // Upload response (subcommand, slot, status)
+    SYSEX_CMD_SEQUENCE_TRACK_PLAY              = 0x44,  // Play track (slot, loop_mode: 0=ONESHOT, 1=LOOP)
+    SYSEX_CMD_SEQUENCE_TRACK_STOP              = 0x45,  // Stop track playback
+    SYSEX_CMD_SEQUENCE_TRACK_MUTE              = 0x46,  // Mute/unmute track (slot, mute: 0=UNMUTE, 1=MUTE)
+    SYSEX_CMD_SEQUENCE_TRACK_SOLO              = 0x47,  // Solo/unsolo track (slot, solo: 0=UNSOLO, 1=SOLO)
+    SYSEX_CMD_SEQUENCE_TRACK_GET_STATE         = 0x48,  // Query track state
+    SYSEX_CMD_SEQUENCE_TRACK_STATE_RESPONSE    = 0x49,  // Track state response
+    SYSEX_CMD_SEQUENCE_TRACK_CLEAR             = 0x4A,  // Clear/delete track from slot
+    SYSEX_CMD_SEQUENCE_TRACK_LIST              = 0x4B,  // List occupied slots
+    SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD          = 0x4C,  // Download track (subcommand: 0=START, 1=GET_CHUNK, 2=COMPLETE)
+    SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE = 0x4D,  // Download response (subcommand, slot, data)
 } SysExCommand;
 
 // Effect IDs for FX_EFFECT_GET/SET commands
@@ -215,6 +230,19 @@ int sysex_parse_fx_state_response(const uint8_t *data, size_t data_len,
                                    uint8_t *out_eq_params,          // 3 bytes
                                    uint8_t *out_compressor_params,  // 5 bytes
                                    uint8_t *out_delay_params);      // 3 bytes
+
+// --- Sequence Track Upload Response Functions ---
+
+// Build SEQUENCE_TRACK_UPLOAD_RESPONSE message
+// Response for sequence track upload subcommands
+// subcommand: The upload subcommand being acknowledged (0=START, 1=CHUNK, 2=COMPLETE)
+// slot: Sequence slot number (0-15)
+// status: 0x00 = success/ACK, 0x01 = error/NACK, 0x02 = chunk received
+size_t sysex_build_sequence_track_upload_response(uint8_t target_device_id,
+                                                   uint8_t subcommand,
+                                                   uint8_t slot,
+                                                   uint8_t status,
+                                                   uint8_t *buffer, size_t buffer_size);
 
 // --- Helper Functions ---
 

@@ -41,6 +41,9 @@ extern "C" {
 #include "midi_file_player.h"
 #include "midi_sysex.h"
 #include "medness_performance.h"
+#include "sequence_upload.h"
+#include "sequence_rsx_manager.h"
+#include "sequence_download.h"
 }
 
 #include "samplecrate_engine.h"
@@ -1265,6 +1268,414 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             // This is a response message (we sent it), silently ignore when received back
             break;
 
+        // === SEQUENCE TRACK UPLOAD AND CONTROL (0x80-0x89) ===
+
+        case SYSEX_CMD_SEQUENCE_TRACK_UPLOAD: {
+            // Combined upload command with subcommands
+            // F0 7D <dev> 80 <subcommand> <data...> F7
+            if (data_len < 1) {
+                printf("[SysEx] SEQUENCE_TRACK_UPLOAD: insufficient data\n");
+                break;
+            }
+
+            uint8_t subcommand = data[0];
+            uint8_t sysex_buffer[64];
+            size_t msg_len;
+
+            switch (subcommand) {
+                case 0x00: {  // START
+                    // F0 7D <dev> 80 00 <slot> <program> <chunks> <size_lsb> <size_msb> F7
+                    if (data_len < 6) {
+                        printf("[SysEx] SEQUENCE_TRACK_UPLOAD START: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    uint8_t program = data[2] & 0x7F;  // Program/pad assignment
+                    uint8_t total_chunks = data[3];
+                    uint16_t file_size = data[4] | (data[5] << 7);
+
+                    printf("[SysEx] SEQUENCE_TRACK_UPLOAD START: slot=%d program=%d chunks=%d size=%d\n",
+                           slot, program, total_chunks, file_size);
+
+                    int result = sequence_upload_start(slot, program, total_chunks, file_size);
+                    uint8_t ack_status = (result == 0) ? 0x00 : 0x01;
+
+                    if (result == 0) {
+                        printf("[SysEx] Upload session started successfully\n");
+                    } else {
+                        printf("[SysEx] Failed to start upload session\n");
+                    }
+
+                    msg_len = sysex_build_sequence_track_upload_response(
+                        device_id, 0x00, slot, ack_status,
+                        sysex_buffer, sizeof(sysex_buffer)
+                    );
+                    if (msg_len > 0) {
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                        printf("[SysEx] Sent response for UPLOAD START: status=%s\n", ack_status == 0 ? "OK" : "ERROR");
+                    }
+                    break;
+                }
+
+                case 0x01: {  // CHUNK
+                    // F0 7D <dev> 80 01 <slot> <chunk#> <encoded_data...> F7
+                    if (data_len < 3) {
+                        printf("[SysEx] SEQUENCE_TRACK_UPLOAD CHUNK: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    uint8_t chunk_num = data[2];
+                    const uint8_t *encoded_data = &data[3];
+                    size_t encoded_len = data_len - 3;
+
+                    int result = sequence_upload_chunk(slot, chunk_num, encoded_data, encoded_len);
+                    uint8_t ack_status = (result == 0) ? 0x02 : 0x01;  // 0x02=chunk received
+
+                    if (result != 0) {
+                        printf("[SysEx] Failed to process chunk %d for slot %d\n", chunk_num, slot);
+                        sequence_upload_abort(slot);
+                    }
+
+                    msg_len = sysex_build_sequence_track_upload_response(
+                        device_id, 0x01, slot, ack_status,
+                        sysex_buffer, sizeof(sysex_buffer)
+                    );
+                    if (msg_len > 0) {
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                    }
+                    break;
+                }
+
+                case 0x02: {  // COMPLETE
+                    // F0 7D <dev> 80 02 <slot> F7
+                    if (data_len < 2) {
+                        printf("[SysEx] SEQUENCE_TRACK_UPLOAD COMPLETE: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    int result = sequence_upload_complete(slot);
+                    uint8_t ack_status = (result == 0) ? 0x00 : 0x01;
+
+                    if (result == 0) {
+                        printf("[SysEx] Upload completed successfully for slot %d\n", slot);
+
+                        // Get the program number from the upload session
+                        UploadSession* session = sequence_upload_get_session(slot);
+                        uint8_t program = session ? session->program : 0;
+
+                        // Add sequence to RSX structure
+                        sequence_rsx_add_uploaded(rsx, slot, program, rsx_file_path.c_str());
+
+                        // Reload sequences from updated RSX
+                        reload_sequences();
+                    } else {
+                        printf("[SysEx] Failed to complete upload for slot %d\n", slot);
+                    }
+
+                    msg_len = sysex_build_sequence_track_upload_response(
+                        device_id, 0x02, slot, ack_status,
+                        sysex_buffer, sizeof(sysex_buffer)
+                    );
+                    if (msg_len > 0) {
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                        printf("[SysEx] Sent response for UPLOAD COMPLETE: status=%s\n", ack_status == 0 ? "OK" : "ERROR");
+                    }
+                    break;
+                }
+
+                default:
+                    printf("[SysEx] SEQUENCE_TRACK_UPLOAD: Unknown subcommand 0x%02X\n", subcommand);
+                    break;
+            }
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_PLAY: {
+            // F0 7D <dev> 44 <slot> <loop_mode> F7
+            // loop_mode: 0=ONESHOT, 1=LOOP
+            // NOTE: Uses sequence_manager global (same as upload completion and reload_sequences)
+            if (data_len < 2) {
+                printf("[SysEx] SEQUENCE_TRACK_PLAY: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            uint8_t loop_mode = data[1];
+            printf("[SysEx] SEQUENCE_TRACK_PLAY: slot=%d loop_mode=%s\n",
+                   slot, loop_mode ? "LOOP" : "ONESHOT");
+
+            // Check if sequence_manager is initialized
+            if (!sequence_manager) {
+                printf("[SysEx] SEQUENCE_TRACK_PLAY: sequence_manager not initialized\n");
+                break;
+            }
+
+            // Find the sequence index for this slot in RSX
+            int seq_idx = sequence_rsx_find_slot(rsx, slot);
+            if (seq_idx < 0) {
+                printf("[SysEx] SEQUENCE_TRACK_PLAY: No sequence found for slot %d\n", slot);
+                break;
+            }
+
+            // Get current pulse from sequencer for synchronized playback
+            int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+
+            // Set the loop mode on the sequence
+            MednessSequence* player = medness_performance_get_player(sequence_manager, seq_idx);
+            if (player) {
+                medness_sequence_set_loop(player, loop_mode);
+            }
+
+            // Start playback synchronized with current sequencer position
+            medness_performance_play(sequence_manager, seq_idx, current_pulse);
+            printf("[SysEx] Started sequence %d (slot %d) in %s mode\n",
+                   seq_idx, slot, loop_mode ? "LOOP" : "ONESHOT");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_STOP: {
+            // F0 7D <dev> 83 <slot> F7
+            if (data_len < 1) {
+                printf("[SysEx] SEQUENCE_TRACK_STOP: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            printf("[SysEx] SEQUENCE_TRACK_STOP: slot=%d\n", slot);
+
+            // TODO: Stop sequence playback
+            printf("[SysEx] Sequence stop not yet implemented\n");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_MUTE: {
+            // F0 7D <dev> 84 <slot> <mute> F7
+            // mute: 0=UNMUTE, 1=MUTE
+            if (data_len < 2) {
+                printf("[SysEx] SEQUENCE_TRACK_MUTE: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            uint8_t mute = data[1];
+            printf("[SysEx] SEQUENCE_TRACK_MUTE: slot=%d mute=%s\n",
+                   slot, mute ? "MUTE" : "UNMUTE");
+
+            // TODO: Mute/unmute sequence track
+            printf("[SysEx] Sequence mute not yet implemented\n");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_SOLO: {
+            // F0 7D <dev> 85 <slot> <solo> F7
+            // solo: 0=UNSOLO, 1=SOLO
+            if (data_len < 2) {
+                printf("[SysEx] SEQUENCE_TRACK_SOLO: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            uint8_t solo = data[1];
+            printf("[SysEx] SEQUENCE_TRACK_SOLO: slot=%d solo=%s\n",
+                   slot, solo ? "SOLO" : "UNSOLO");
+
+            // TODO: Solo/unsolo sequence track
+            printf("[SysEx] Sequence solo not yet implemented\n");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_GET_STATE: {
+            // F0 7D <dev> 86 <slot> F7
+            if (data_len < 1) {
+                printf("[SysEx] SEQUENCE_TRACK_GET_STATE: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            printf("[SysEx] SEQUENCE_TRACK_GET_STATE: slot=%d\n", slot);
+
+            // TODO: Query sequence state and send SEQUENCE_TRACK_STATE_RESPONSE (0x87)
+            // Response should include: slot, program, loop_mode, playing, mute, solo
+            printf("[SysEx] Sequence state query not yet implemented\n");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_CLEAR: {
+            // F0 7D <dev> 88 <slot> F7
+            if (data_len < 1) {
+                printf("[SysEx] SEQUENCE_TRACK_CLEAR: insufficient data\n");
+                break;
+            }
+
+            uint8_t slot = data[0] & 0x0F;
+            printf("[SysEx] SEQUENCE_TRACK_CLEAR: slot=%d\n", slot);
+
+            // Delete sequence file
+            char filename[256];
+            snprintf(filename, sizeof(filename), "sequences/seq_%d.mid", slot);
+            if (remove(filename) == 0) {
+                printf("[SysEx] Deleted sequence file: %s\n", filename);
+
+                // Remove sequence from RSX structure
+                sequence_rsx_remove(rsx, slot, rsx_file_path.c_str());
+
+                // Reload to update runtime state
+                reload_sequences();
+            } else {
+                printf("[SysEx] Failed to delete sequence file: %s\n", filename);
+            }
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_LIST: {
+            // F0 7D <dev> 89 F7
+            printf("[SysEx] SEQUENCE_TRACK_LIST\n");
+
+            // TODO: Query which slots have sequences and send response
+            // Response could be a bitmap or list of occupied slots
+            printf("[SysEx] Sequence list not yet implemented\n");
+            break;
+        }
+
+        case SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD: {
+            // Download command with subcommands
+            if (data_len < 1) {
+                printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD: insufficient data\n");
+                break;
+            }
+
+            uint8_t subcommand = data[0];
+            uint8_t sysex_buffer[512];
+            size_t msg_len;
+
+            switch (subcommand) {
+                case 0x00: {  // START
+                    // F0 7D <dev> 8A 00 <slot> F7
+                    if (data_len < 2) {
+                        printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD START: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    uint8_t program;
+                    uint16_t total_chunks;
+                    uint16_t file_size;
+
+                    printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD START: slot=%d\n", slot);
+
+                    int result = sequence_download_start(slot, &program, &total_chunks, &file_size);
+
+                    if (result == 0) {
+                        // Success - build response with metadata
+                        // F0 7D <dev> 8B 00 <slot> <program> <chunks> <size_lsb> <size_msb> F7
+                        sysex_buffer[0] = SYSEX_START;
+                        sysex_buffer[1] = SYSEX_MANUFACTURER_ID;
+                        sysex_buffer[2] = device_id & 0x7F;
+                        sysex_buffer[3] = SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE;
+                        sysex_buffer[4] = 0x00;  // Subcommand: START
+                        sysex_buffer[5] = slot & 0x0F;
+                        sysex_buffer[6] = program & 0x7F;
+                        sysex_buffer[7] = total_chunks & 0x7F;
+                        sysex_buffer[8] = file_size & 0x7F;
+                        sysex_buffer[9] = (file_size >> 7) & 0x7F;
+                        sysex_buffer[10] = SYSEX_END;
+                        msg_len = 11;
+
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                        printf("[SysEx] Sent DOWNLOAD START response: program=%d, chunks=%d, size=%d\n",
+                               program, total_chunks, file_size);
+                    } else {
+                        // Error - send error response
+                        sysex_buffer[0] = SYSEX_START;
+                        sysex_buffer[1] = SYSEX_MANUFACTURER_ID;
+                        sysex_buffer[2] = device_id & 0x7F;
+                        sysex_buffer[3] = SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE;
+                        sysex_buffer[4] = 0x00;  // Subcommand: START
+                        sysex_buffer[5] = slot & 0x0F;
+                        sysex_buffer[6] = 0x01;  // Status: ERROR
+                        sysex_buffer[7] = SYSEX_END;
+                        msg_len = 8;
+
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                        printf("[SysEx] Sent DOWNLOAD START error response\n");
+                    }
+                    break;
+                }
+
+                case 0x01: {  // GET_CHUNK
+                    // F0 7D <dev> 8A 01 <slot> <chunk#> F7
+                    if (data_len < 3) {
+                        printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD GET_CHUNK: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    uint8_t chunk_num = data[2];
+
+                    // Get chunk data (7-bit encoded)
+                    uint8_t chunk_buffer[512];  // Max encoded chunk size
+                    size_t encoded_len = sequence_download_get_chunk(slot, chunk_num, chunk_buffer, sizeof(chunk_buffer));
+
+                    if (encoded_len > 0) {
+                        // Build response: F0 7D <dev> 8B 01 <slot> <chunk#> <encoded_data...> F7
+                        sysex_buffer[0] = SYSEX_START;
+                        sysex_buffer[1] = SYSEX_MANUFACTURER_ID;
+                        sysex_buffer[2] = device_id & 0x7F;
+                        sysex_buffer[3] = SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE;
+                        sysex_buffer[4] = 0x01;  // Subcommand: GET_CHUNK
+                        sysex_buffer[5] = slot & 0x0F;
+                        sysex_buffer[6] = chunk_num;
+
+                        // Copy encoded data
+                        memcpy(&sysex_buffer[7], chunk_buffer, encoded_len);
+                        sysex_buffer[7 + encoded_len] = SYSEX_END;
+                        msg_len = 8 + encoded_len;
+
+                        midi_output_send_sysex(sysex_buffer, msg_len);
+                    } else {
+                        printf("[SysEx] Failed to get chunk %d for slot %d\n", chunk_num, slot);
+                    }
+                    break;
+                }
+
+                case 0x02: {  // COMPLETE
+                    // F0 7D <dev> 8A 02 <slot> F7
+                    if (data_len < 2) {
+                        printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD COMPLETE: insufficient data\n");
+                        break;
+                    }
+
+                    uint8_t slot = data[1] & 0x0F;
+                    printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD COMPLETE: slot=%d\n", slot);
+
+                    sequence_download_complete(slot);
+
+                    // Send completion acknowledgment
+                    sysex_buffer[0] = SYSEX_START;
+                    sysex_buffer[1] = SYSEX_MANUFACTURER_ID;
+                    sysex_buffer[2] = device_id & 0x7F;
+                    sysex_buffer[3] = SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE;
+                    sysex_buffer[4] = 0x02;  // Subcommand: COMPLETE
+                    sysex_buffer[5] = slot & 0x0F;
+                    sysex_buffer[6] = 0x00;  // Status: OK
+                    sysex_buffer[7] = SYSEX_END;
+                    msg_len = 8;
+
+                    midi_output_send_sysex(sysex_buffer, msg_len);
+                    printf("[SysEx] Sent DOWNLOAD COMPLETE response\n");
+                    break;
+                }
+
+                default:
+                    printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD: Unknown subcommand 0x%02X\n", subcommand);
+                    break;
+            }
+            break;
+        }
+
         default:
             // Silently ignore unhandled/unknown commands
             break;
@@ -2362,6 +2773,14 @@ int main(int argc, char* argv[]) {
         sysex_register_callback(sysex_callback, nullptr);
         std::cout << "SysEx initialized (device ID: " << (int)sysex_get_device_id() << ")" << std::endl;
 
+        // Initialize sequence upload system
+        sequence_upload_init();
+        std::cout << "Sequence upload system initialized" << std::endl;
+
+        // Initialize sequence download system
+        sequence_download_init();
+        std::cout << "Sequence download system initialized" << std::endl;
+
         if (midi_init_multi(midi_event_callback, nullptr, midi_device_ports, MIDI_MAX_DEVICES) == 0) {
             std::cout << "MIDI input initialized successfully" << std::endl;
             if (midi_device_ports[0] >= 0) {
@@ -2416,6 +2835,15 @@ int main(int argc, char* argv[]) {
                 }
                 std::cout << "Fullscreen pads mode: " << (fullscreen_pads_mode ? "ON" : "OFF") << std::endl;
             }
+        }
+
+        // Check for stale upload/download sessions (every 10 seconds, not every frame!)
+        static time_t last_timeout_check = 0;
+        time_t now = time(NULL);
+        if (now - last_timeout_check >= 10) {
+            sequence_upload_check_timeouts();
+            sequence_download_check_timeouts();
+            last_timeout_check = now;
         }
 
         ImGui_ImplOpenGL2_NewFrame();

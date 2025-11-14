@@ -415,6 +415,28 @@ int sysex_parse_fx_state_response(const uint8_t *data, size_t data_len,
     return 1;
 }
 
+// --- Sequence Track Upload Response Functions ---
+
+size_t sysex_build_sequence_track_upload_response(uint8_t target_device_id,
+                                                   uint8_t subcommand,
+                                                   uint8_t slot,
+                                                   uint8_t status,
+                                                   uint8_t *buffer, size_t buffer_size) {
+    // Message format: F0 7D <dev> 81 <subcommand> <slot> <status> F7
+    if (!buffer || buffer_size < 8) return 0;
+
+    buffer[0] = SYSEX_START;
+    buffer[1] = SYSEX_MANUFACTURER_ID;
+    buffer[2] = target_device_id & 0x7F;
+    buffer[3] = SYSEX_CMD_SEQUENCE_TRACK_UPLOAD_RESPONSE;
+    buffer[4] = subcommand & 0x7F;    // Upload subcommand (0=START, 1=CHUNK, 2=COMPLETE)
+    buffer[5] = slot & 0x0F;          // Slot number (0-15)
+    buffer[6] = status & 0x7F;        // Status: 0=success, 1=error, 2=chunk received
+    buffer[7] = SYSEX_END;
+
+    return 8;
+}
+
 // --- Helper Functions ---
 
 const char* sysex_command_name(SysExCommand cmd) {
@@ -435,6 +457,18 @@ const char* sysex_command_name(SysExCommand cmd) {
         case SYSEX_CMD_TRIGGER_PAD:    return "TRIGGER_PAD";
         case SYSEX_CMD_CHANNEL_PANNING: return "CHANNEL_PANNING";
         case SYSEX_CMD_MASTER_PANNING: return "MASTER_PANNING";
+        case SYSEX_CMD_SEQUENCE_TRACK_UPLOAD: return "SEQUENCE_TRACK_UPLOAD";
+        case SYSEX_CMD_SEQUENCE_TRACK_UPLOAD_RESPONSE: return "SEQUENCE_TRACK_UPLOAD_RESPONSE";
+        case SYSEX_CMD_SEQUENCE_TRACK_PLAY:  return "SEQUENCE_TRACK_PLAY";
+        case SYSEX_CMD_SEQUENCE_TRACK_STOP:  return "SEQUENCE_TRACK_STOP";
+        case SYSEX_CMD_SEQUENCE_TRACK_MUTE:  return "SEQUENCE_TRACK_MUTE";
+        case SYSEX_CMD_SEQUENCE_TRACK_SOLO:  return "SEQUENCE_TRACK_SOLO";
+        case SYSEX_CMD_SEQUENCE_TRACK_GET_STATE: return "SEQUENCE_TRACK_GET_STATE";
+        case SYSEX_CMD_SEQUENCE_TRACK_STATE_RESPONSE: return "SEQUENCE_TRACK_STATE_RESPONSE";
+        case SYSEX_CMD_SEQUENCE_TRACK_CLEAR: return "SEQUENCE_TRACK_CLEAR";
+        case SYSEX_CMD_SEQUENCE_TRACK_LIST:  return "SEQUENCE_TRACK_LIST";
+        case SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD: return "SEQUENCE_TRACK_DOWNLOAD";
+        case SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE: return "SEQUENCE_TRACK_DOWNLOAD_RESPONSE";
         case SYSEX_CMD_FX_EFFECT_GET:  return "FX_EFFECT_GET";
         case SYSEX_CMD_FX_EFFECT_SET:  return "FX_EFFECT_SET";
         case SYSEX_CMD_FX_GET_ALL_STATE: return "FX_GET_ALL_STATE";
