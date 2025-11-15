@@ -54,8 +54,9 @@ int sequence_upload_start(uint8_t slot, uint8_t program, uint16_t total_chunks, 
 int sequence_upload_chunk(uint8_t slot, uint8_t chunk_num, const uint8_t *encoded_data, size_t encoded_len);
 
 // Complete upload and save to file
+// output_dir: Directory where to save the file (if NULL, uses current directory)
 // Returns 0 on success, -1 on error
-int sequence_upload_complete(uint8_t slot);
+int sequence_upload_complete(uint8_t slot, const char* output_dir);
 
 // Abort current upload session
 void sequence_upload_abort(uint8_t slot);

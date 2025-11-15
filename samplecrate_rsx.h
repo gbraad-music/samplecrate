@@ -94,6 +94,7 @@ typedef struct {
     int enabled;                        // 1=enabled, 0=disabled
     int loop;                           // 1=loop entire sequence, 0=play once
     int program_number;                 // Program to target (0-3 for programs 1-4)
+    int slot;                           // Slot number for uploaded sequences (0-15, -1 = not uploaded)
 } RSXSequence;
 
 // Note trigger pad configuration (SONG pads - stored in .rsx files)

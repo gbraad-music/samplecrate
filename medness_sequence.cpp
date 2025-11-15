@@ -38,7 +38,18 @@ struct MednessSequence {
 // Internal callback from MednessSequencer for MIDI events
 static void sequence_midi_callback(int note, int velocity, int on, void* userdata) {
     MednessSequence* seq = (MednessSequence*)userdata;
-    if (!seq || !seq->callback) return;
+    if (!seq) {
+        std::cout << "[SEQUENCE CALLBACK] ERROR: seq is NULL!" << std::endl;
+        return;
+    }
+
+    std::cout << "[SEQUENCE CALLBACK] slot=" << seq->sequencer_slot
+              << " note=" << note << " vel=" << velocity << " on=" << on << std::endl;
+
+    if (!seq->callback) {
+        std::cout << "[SEQUENCE CALLBACK] WARNING: No user callback set!" << std::endl;
+        return;
+    }
 
     // Pass through to user callback
     seq->callback(note, velocity, on, seq->userdata);
@@ -252,6 +263,12 @@ void medness_sequence_play(MednessSequence* player) {
     Phrase& first_phrase = player->phrases[0];
     if (first_phrase.track) {
         std::cout << "[SEQUENCE] Starting phrase 0: " << first_phrase.name << std::endl;
+
+        // Debug: check track event count
+        int event_count = 0;
+        medness_track_get_events(first_phrase.track, &event_count);
+        std::cout << "[SEQUENCE] Track has " << event_count << " events" << std::endl;
+        std::cout << "[SEQUENCE] Adding track to sequencer slot " << player->sequencer_slot << std::endl;
 
         // Add track to sequencer with loop callback
         medness_sequencer_add_track(player->sequencer, player->sequencer_slot,

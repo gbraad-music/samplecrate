@@ -101,6 +101,7 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->sequences[i].num_phrases = 0;
         rsx->sequences[i].enabled = 1;
         rsx->sequences[i].loop = 1;  // Default: loop sequence
+        rsx->sequences[i].slot = -1;  // -1 = not an uploaded sequence
     }
 
     // Initialize FX chain enables (default ON)
@@ -303,6 +304,7 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
         rsx->sequences[i].enabled = 1;
         rsx->sequences[i].loop = 1;
         rsx->sequences[i].program_number = 0;
+        rsx->sequences[i].slot = -1;
     }
 
     FILE* f = fopen(filepath, "r");
@@ -507,6 +509,8 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                     rsx->sequences[seq_idx].loop = atoi(value);
                 } else if (strcmp(key, "program_number") == 0) {
                     rsx->sequences[seq_idx].program_number = atoi(value);
+                } else if (strcmp(key, "slot") == 0) {
+                    rsx->sequences[seq_idx].slot = atoi(value);
                 } else if (strcmp(key, "num_phrases") == 0) {
                     rsx->sequences[seq_idx].num_phrases = atoi(value);
                     if (seq_num > rsx->num_sequences) {
@@ -755,6 +759,7 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
             fprintf(f, "enabled=%d\n", seq->enabled);
             fprintf(f, "loop=%d  ; 1=loop sequence, 0=play once\n", seq->loop);
             fprintf(f, "program_number=%d  ; Program to target (0-3 for programs 1-4)\n", seq->program_number);
+            fprintf(f, "slot=%d  ; Upload slot (0-15=remote upload, -1=manual sequence)\n", seq->slot);
             fprintf(f, "num_phrases=%d\n", seq->num_phrases);
 
             // Write phrases

@@ -437,7 +437,7 @@ static void midi_note_to_string(int note, char* buf, size_t bufsize) {
     }
 
     const char* note_names[] = {"C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"};
-    int octave = (note / 12) - 1;  // MIDI note 0 = C-(-1), 12 = C-0, 24 = C-1, etc.
+    int octave = (note / 12);  // Direct MIDI octave: note 60 = C-5, note 48 = C-4, note 36 = C-3
     int semitone = note % 12;
 
     snprintf(buf, bufsize, "%s%d", note_names[semitone], octave);
@@ -1356,7 +1356,17 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                     }
 
                     uint8_t slot = data[1] & 0x0F;
-                    int result = sequence_upload_complete(slot);
+
+                    // Get RSX directory for saving uploaded sequences
+                    char rsx_dir[1024] = "";
+                    if (!rsx_file_path.empty()) {
+                        strncpy(rsx_dir, rsx_file_path.c_str(), sizeof(rsx_dir) - 1);
+                        rsx_dir[sizeof(rsx_dir) - 1] = '\0';
+                        char* dir = dirname(rsx_dir);
+                        strncpy(rsx_dir, dir, sizeof(rsx_dir) - 1);
+                    }
+
+                    int result = sequence_upload_complete(slot, rsx_dir[0] ? rsx_dir : nullptr);
                     uint8_t ack_status = (result == 0) ? 0x00 : 0x01;
 
                     if (result == 0) {
@@ -1420,17 +1430,25 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                 break;
             }
 
-            // Get current pulse from sequencer for synchronized playback
-            int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
-
             // Set the loop mode on the sequence
             MednessSequence* player = medness_performance_get_player(sequence_manager, seq_idx);
             if (player) {
                 medness_sequence_set_loop(player, loop_mode);
             }
 
-            // Start playback synchronized with current sequencer position
+            // Force immediate start mode for remote control (don't wait for quantization)
+            SequenceStartMode prev_mode = medness_performance_get_start_mode(sequence_manager);
+            medness_performance_set_start_mode(sequence_manager, SEQUENCE_START_IMMEDIATE);
+
+            // Get current pulse from sequencer (if active) for synchronized playback
+            int current_pulse = sequencer ? medness_sequencer_get_pulse(sequencer) : 0;
+
+            // Start playback immediately
             medness_performance_play(sequence_manager, seq_idx, current_pulse);
+
+            // Restore previous start mode
+            medness_performance_set_start_mode(sequence_manager, prev_mode);
+
             printf("[SysEx] Started sequence %d (slot %d) in %s mode\n",
                    seq_idx, slot, loop_mode ? "LOOP" : "ONESHOT");
             break;
@@ -2228,6 +2246,23 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     // This runs in the audio thread for perfect timing (no UI blocking!)
     // The MIDI event callbacks will acquire the lock themselves
     if (performance) {
+        // Check for MIDI clock timeout (fall back to internal clock if no pulses received)
+        if (midi_clock.active && midi_clock.last_clock_time > 0) {
+            uint64_t now = get_microseconds();
+            uint64_t time_since_last_pulse = now - midi_clock.last_clock_time;
+            const uint64_t CLOCK_TIMEOUT_US = 1000000; // 1 second timeout
+
+            if (time_since_last_pulse > CLOCK_TIMEOUT_US) {
+                printf("[MIDI CLOCK] Timeout detected (%llu us since last pulse) - falling back to internal clock\n",
+                       (unsigned long long)time_since_last_pulse);
+                midi_clock.active = false;
+                midi_clock.running = false;
+                if (sequencer) {
+                    medness_sequencer_set_external_clock(sequencer, 0);
+                }
+            }
+        }
+
         // Get pattern position from sequencer (single source of truth)
         // Sequencer handles internal timing advancement
         int current_pulse = -1;
@@ -2404,8 +2439,14 @@ void pad_visual_feedback(int pad_index, int note, int velocity, int on) {
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
 
-    // For sequences, userdata is nullptr - send to current program
+    // Extract target program from userdata (if provided by sequence)
+    // Otherwise fall back to current_program (for backwards compatibility)
     int target_program = current_program;
+    if (userdata) {
+        target_program = *(int*)userdata;
+    }
+
+    printf("[MIDI CALLBACK] note=%d vel=%d on=%d program=%d\n", note, velocity, on, target_program);
 
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];
@@ -2671,6 +2712,9 @@ int main(int argc, char* argv[]) {
         } else {
             // Load MIDI files for pads (engine handles routing, provides visual feedback callback)
             samplecrate_engine_load_pads(engine, pad_visual_feedback);
+
+            // Load sequences from RSX
+            reload_sequences();
         }
     }
 
@@ -5600,6 +5644,8 @@ int main(int argc, char* argv[]) {
                     };
 
                     std::vector<PlayingPad> playing_pads;
+
+                    // Collect playing pads
                     for (int pad_idx = 0; pad_idx < rsx->num_pads && pad_idx < RSX_MAX_NOTE_PADS; pad_idx++) {
                         if (!medness_performance_is_playing(performance, pad_idx)) continue;
 
@@ -5628,6 +5674,34 @@ int main(int argc, char* argv[]) {
                         playing_pads.push_back(pp);
                     }
 
+                    // Also collect playing sequences from sequence_manager (uploaded sequences)
+                    if (sequence_manager) {
+                        for (int seq_idx = 0; seq_idx < RSX_MAX_SEQUENCES; seq_idx++) {
+                            if (!medness_performance_is_playing(sequence_manager, seq_idx)) continue;
+
+                            MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
+                            if (!seq) continue;
+
+                            MednessTrack* track = medness_sequence_get_current_track(seq);
+                            if (!track) continue;
+
+                            int event_count = 0;
+                            const MednessTrackEvent* events = medness_track_get_events(track, &event_count);
+                            int tpqn = medness_track_get_tpqn(track);
+
+                            if (event_count == 0) continue;
+
+                            PlayingPad pp;
+                            pp.pad_idx = 100 + seq_idx;  // Use 100+ to distinguish from pads
+                            pp.track = track;
+                            pp.events = events;
+                            pp.event_count = event_count;
+                            pp.tpqn = tpqn;
+                            pp.program_num = 0;  // TODO: get from sequence
+                            playing_pads.push_back(pp);
+                        }
+                    }
+
                     if (playing_pads.empty()) {
                         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No pads playing - trigger a pad to view track data");
                     } else {
@@ -5647,7 +5721,21 @@ int main(int argc, char* argv[]) {
                         // Header row
                         ImGui::Text("Row"); ImGui::NextColumn();
                         for (const auto& pp : playing_pads) {
-                            ImGui::Text("%s", rsx->pads[pp.pad_idx].description);
+                            if (pp.pad_idx >= 100) {
+                                // Uploaded sequence - show slot number (1-based)
+                                int seq_idx = pp.pad_idx - 100;
+                                int slot = rsx->sequences[seq_idx].slot;
+                                if (slot >= 0) {
+                                    // Remote upload: show as S1, S2, etc. (slot 0 = S1)
+                                    ImGui::Text("S%d", slot + 1);
+                                } else {
+                                    // Manual sequence: show as S1, S2, etc. (seq_idx 0 = S1)
+                                    ImGui::Text("S%d", seq_idx + 1);
+                                }
+                            } else {
+                                // Pad
+                                ImGui::Text("%s", rsx->pads[pp.pad_idx].description);
+                            }
                             ImGui::NextColumn();
                         }
                         ImGui::Separator();

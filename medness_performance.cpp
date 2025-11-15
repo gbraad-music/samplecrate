@@ -46,6 +46,7 @@ static void resolve_midi_path(const char* rsx_path, const char* midi_file, char*
         return;
     }
 
+    // All relative paths (including sequences/) are resolved relative to RSX directory
     // Make a copy for dirname (it modifies the string)
     char rsx_copy[1024];
     strncpy(rsx_copy, rsx_path, sizeof(rsx_copy) - 1);

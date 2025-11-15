@@ -4,19 +4,30 @@
 
 /**
  * Find sequence index for a given slot
+ * Slots 0-15 are for uploaded sequences (remote control)
+ * Slot -1 or unset means it's a manually created sequence
  */
 int sequence_rsx_find_slot(SamplecrateRSX* rsx, uint8_t slot) {
     if (!rsx) return -1;
 
-    // Search for sequence that references seq_<slot>.mid
+    // First, try using explicit slot field (new method - reliable)
+    for (int i = 0; i < rsx->num_sequences; i++) {
+        if (rsx->sequences[i].slot == (int)slot) {
+            return i;
+        }
+    }
+
+    // Fallback: search by filename pattern (legacy compatibility)
     for (int i = 0; i < rsx->num_sequences; i++) {
         if (rsx->sequences[i].num_phrases > 0) {
             const char* midi_file = rsx->sequences[i].phrases[0].midi_file;
 
             // Check if this phrase references the slot's MIDI file
+            // Support both "seq_N.mid" (old format) and "sequences/seq_N.mid" (new format)
             int existing_slot = -1;
-            if (sscanf(midi_file, "seq_%d.mid", &existing_slot) == 1) {
-                if (existing_slot == slot) {
+            if (sscanf(midi_file, "seq_%d.mid", &existing_slot) == 1 ||
+                sscanf(midi_file, "sequences/seq_%d.mid", &existing_slot) == 1) {
+                if (existing_slot == (int)slot) {
                     return i;
                 }
             }
@@ -64,10 +75,12 @@ int sequence_rsx_add_uploaded(SamplecrateRSX* rsx, uint8_t slot, uint8_t program
     seq->enabled = 1;
     seq->loop = 1;  // Loop by default
     seq->program_number = program;  // Target program
+    seq->slot = slot;  // Store slot number explicitly
 
     // Add phrase pointing to uploaded MIDI file
+    // Note: Path is relative to current working directory (where sequences/ folder is)
     seq->num_phrases = 1;
-    snprintf(seq->phrases[0].midi_file, sizeof(seq->phrases[0].midi_file), "seq_%d.mid", slot);
+    snprintf(seq->phrases[0].midi_file, sizeof(seq->phrases[0].midi_file), "sequences/seq_%d.mid", slot);
     snprintf(seq->phrases[0].name, sizeof(seq->phrases[0].name), "Slot %d", slot);
     seq->phrases[0].loop_count = 0;  // 0 = infinite loop
 

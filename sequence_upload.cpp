@@ -167,7 +167,7 @@ static int validate_midi_header(const uint8_t *data, size_t len) {
 }
 
 // Complete upload and save to file
-int sequence_upload_complete(uint8_t slot) {
+int sequence_upload_complete(uint8_t slot, const char* output_dir) {
     if (slot >= SEQUENCE_MAX_SLOTS) {
         printf("[SequenceUpload] ERROR: Invalid slot %d\n", slot);
         return -1;
@@ -199,16 +199,24 @@ int sequence_upload_complete(uint8_t slot) {
         return -1;
     }
 
-    // Build filename: sequences/seq_<slot>.mid
-    char filename[256];
-    snprintf(filename, sizeof(filename), "sequences/seq_%d.mid", slot);
+    // Build directory path: <output_dir>/sequences/
+    char dir_path[512];
+    if (output_dir && output_dir[0] != '\0') {
+        snprintf(dir_path, sizeof(dir_path), "%s/sequences", output_dir);
+    } else {
+        snprintf(dir_path, sizeof(dir_path), "sequences");
+    }
 
     // Create sequences directory if it doesn't exist
     #ifdef _WIN32
-        _mkdir("sequences");
+        _mkdir(dir_path);
     #else
-        mkdir("sequences", 0755);
+        mkdir(dir_path, 0755);
     #endif
+
+    // Build filename: <dir_path>/seq_<slot>.mid
+    char filename[768];
+    snprintf(filename, sizeof(filename), "%s/seq_%d.mid", dir_path, slot);
 
     // Write to file
     FILE *fp = fopen(filename, "wb");
