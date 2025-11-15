@@ -1380,11 +1380,17 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                         UploadSession* session = sequence_upload_get_session(slot);
                         uint8_t program = session ? session->program : 0;
 
-                        // Add sequence to RSX structure
+                        // Add/update sequence in RSX structure (updates RSX in memory + saves to file)
                         sequence_rsx_add_uploaded(rsx, slot, program, rsx_file_path.c_str());
 
-                        // Reload sequences from updated RSX
-                        reload_sequences();
+                        // Find which sequence index this slot corresponds to
+                        int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                        if (seq_idx >= 0) {
+                            // Reload ONLY this specific sequence (doesn't stop other playing tracks)
+                            medness_performance_reload_sequence(sequence_manager, seq_idx, rsx_file_path.c_str(), rsx);
+                        } else {
+                            printf("[SysEx] WARNING: Could not find sequence index for slot %d\n", slot);
+                        }
                     } else {
                         printf("[SysEx] Failed to complete upload for slot %d\n", slot);
                     }
@@ -2533,7 +2539,7 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
         // else: seq_program == -1, use current_program (already set above)
     }
 
-    printf("[MIDI CALLBACK] note=%d vel=%d on=%d program=%d\n", note, velocity, on, target_program);
+    // printf("[MIDI CALLBACK] note=%d vel=%d on=%d program=%d\n", note, velocity, on, target_program);
 
     // Send to target program synth
     sfizz_synth_t* target_synth = program_synths[target_program];

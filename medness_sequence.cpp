@@ -44,14 +44,14 @@ static void sequence_midi_callback(int note, int velocity, int on, void* userdat
     }
 
     // Slot layout: 0-15 = uploaded sequences, 16-31 = pads
-    const char* prefix = (seq->sequencer_slot < 16) ? "[SEQ CALLBACK]" : "[PAD CALLBACK]";
-    int display_slot = (seq->sequencer_slot < 16) ? seq->sequencer_slot : (seq->sequencer_slot - 16);
+    // const char* prefix = (seq->sequencer_slot < 16) ? "[SEQ CALLBACK]" : "[PAD CALLBACK]";
+    // int display_slot = (seq->sequencer_slot < 16) ? seq->sequencer_slot : (seq->sequencer_slot - 16);
 
-    std::cout << prefix << " slot=" << display_slot
-              << " note=" << note << " vel=" << velocity << " on=" << on << std::endl;
+    // std::cout << prefix << " slot=" << display_slot
+    //           << " note=" << note << " vel=" << velocity << " on=" << on << std::endl;
 
     if (!seq->callback) {
-        std::cout << prefix << " WARNING: No user callback set!" << std::endl;
+        // std::cout << prefix << " WARNING: No user callback set!" << std::endl;
         return;
     }
 

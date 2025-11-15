@@ -206,6 +206,95 @@ int medness_performance_load_from_rsx(MednessPerformance* manager,
     return manager->num_sequences;
 }
 
+// Reload a single sequence without stopping other playing sequences
+int medness_performance_reload_sequence(MednessPerformance* manager,
+                                         int seq_index,
+                                         const char* rsx_path,
+                                         SamplecrateRSX* rsx) {
+    if (!manager || !rsx_path || !rsx) return -1;
+    if (seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return -1;
+    if (seq_index >= rsx->num_sequences) return -1;
+
+    RSXSequence* seq_def = &rsx->sequences[seq_index];
+
+    // Check if this sequence is currently playing
+    bool was_playing = false;
+    if (manager->players[seq_index]) {
+        was_playing = (medness_sequence_is_playing(manager->players[seq_index]) != 0);
+
+        // If currently playing, DON'T reload (keep playing old version)
+        // New version will be loaded next time user manually triggers it
+        if (was_playing) {
+            std::cout << "[SEQUENCE MANAGER] Sequence " << seq_index << " (" << seq_def->name
+                      << ") is currently playing - keeping old version, new version queued for next manual trigger"
+                      << std::endl;
+            return 0;  // Success - RSX updated, but player not reloaded
+        }
+
+        // Not playing - safe to destroy and reload
+        std::cout << "[SEQUENCE MANAGER] Reloading sequence " << seq_index << ": " << seq_def->name << std::endl;
+        medness_sequence_destroy(manager->players[seq_index]);
+        manager->players[seq_index] = nullptr;
+    }
+
+    // If sequence is disabled or empty, just leave it unloaded
+    if (!seq_def->enabled || seq_def->num_phrases == 0) {
+        std::cout << "[SEQUENCE MANAGER] Sequence " << seq_index << " is disabled or empty, leaving unloaded" << std::endl;
+        return 0;
+    }
+
+    // Create new sequence player
+    MednessSequence* seq = medness_sequence_create();
+    if (!seq) {
+        std::cerr << "[SEQUENCE MANAGER] Failed to create player for sequence " << seq_index << std::endl;
+        return -1;
+    }
+
+    // Set sequencer reference and slot
+    medness_sequence_set_sequencer(seq, manager->sequencer, seq_index);
+
+    // Add phrases
+    for (int p = 0; p < seq_def->num_phrases; p++) {
+        RSXPhrase* phrase = &seq_def->phrases[p];
+
+        // Resolve MIDI file path
+        char full_path[1024];
+        resolve_midi_path(rsx_path, phrase->midi_file, full_path, sizeof(full_path));
+
+        std::cout << "  Adding phrase " << p << ": " << phrase->name
+                  << " (loops: " << phrase->loop_count << ")" << std::endl;
+
+        if (medness_sequence_add_phrase(seq, full_path,
+                                           phrase->loop_count,
+                                           phrase->name) < 0) {
+            std::cerr << "  Failed to load phrase: " << phrase->name << " (" << full_path << ")" << std::endl;
+            medness_sequence_destroy(seq);
+            return -1;
+        }
+    }
+
+    // Configure sequence
+    medness_sequence_set_tempo(seq, manager->tempo_bpm);
+    medness_sequence_set_loop(seq, seq_def->loop);
+
+    // Store sequence's program number
+    manager->sequence_programs[seq_index] = seq_def->program_number;
+
+    // Set callbacks
+    if (manager->midi_callback) {
+        medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[seq_index]);
+    }
+    if (manager->phrase_callback) {
+        medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
+    }
+
+    manager->players[seq_index] = seq;
+
+    std::cout << "[SEQUENCE MANAGER] Reloaded sequence " << seq_index << ": " << seq_def->name << std::endl;
+
+    return 0;
+}
+
 void medness_performance_clear(MednessPerformance* manager) {
     if (!manager) return;
 

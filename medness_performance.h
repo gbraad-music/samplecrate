@@ -37,6 +37,16 @@ int medness_performance_load_from_rsx(MednessPerformance* manager,
                                         const char* rsx_path,
                                         SamplecrateRSX* rsx);
 
+// Reload a single sequence from RSX (without stopping other playing sequences)
+// seq_index: sequence index to reload (0-15)
+// rsx_path: path to the RSX file (for resolving relative MIDI paths)
+// rsx: loaded RSX structure
+// Returns: 0 on success, -1 on error
+int medness_performance_reload_sequence(MednessPerformance* manager,
+                                         int seq_index,
+                                         const char* rsx_path,
+                                         SamplecrateRSX* rsx);
+
 // Clear all sequences
 void medness_performance_clear(MednessPerformance* manager);
 

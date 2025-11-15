@@ -239,10 +239,14 @@ int sequence_upload_complete(uint8_t slot, const char* output_dir) {
     printf("[SequenceUpload] Successfully saved slot %d to %s (%d bytes)\n",
            slot, filename, session->buffer_pos);
 
-    // Free buffer
+    // Free buffer and reset session to IDLE (ready for next upload)
     free(session->buffer);
     session->buffer = nullptr;
-    session->state = UPLOAD_STATE_COMPLETE;
+    session->buffer_pos = 0;
+    session->chunks_received = 0;
+    session->total_chunks = 0;
+    session->file_size = 0;
+    session->state = UPLOAD_STATE_IDLE;  // Reset to IDLE, not COMPLETE
 
     return 0;
 }
