@@ -5834,8 +5834,22 @@ int main(int argc, char* argv[]) {
                                     ImGui::Text("S%d", seq_idx + 1);
                                 }
                             } else {
-                                // Pad
-                                ImGui::Text("%s", rsx->pads[pp.pad_idx].description);
+                                // Pad - get actual assigned slot number from sequence player
+                                MednessSequence* seq = medness_performance_get_player(performance, pp.pad_idx);
+                                int slot = seq ? medness_sequence_get_slot(seq) : -1;
+
+                                if (slot >= 16 && slot <= 31) {
+                                    // Show as P1-P16 with description
+                                    const char* desc = rsx->pads[pp.pad_idx].description;
+                                    if (desc[0] != '\0') {
+                                        ImGui::Text("P%d: %s", slot - 15, desc);
+                                    } else {
+                                        ImGui::Text("P%d", slot - 15);
+                                    }
+                                } else {
+                                    // Fallback if slot not assigned (shouldn't happen)
+                                    ImGui::Text("%s", rsx->pads[pp.pad_idx].description);
+                                }
                             }
                             ImGui::NextColumn();
                         }

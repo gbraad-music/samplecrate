@@ -43,9 +43,9 @@ static void sequence_midi_callback(int note, int velocity, int on, void* userdat
         return;
     }
 
-    // Distinguish between pad slots (0-31) and sequence slots (32+)
-    const char* prefix = (seq->sequencer_slot < 32) ? "[PAD CALLBACK]" : "[SEQ CALLBACK]";
-    int display_slot = (seq->sequencer_slot < 32) ? seq->sequencer_slot : (seq->sequencer_slot - 32);
+    // Slot layout: 0-15 = uploaded sequences, 16-31 = pads
+    const char* prefix = (seq->sequencer_slot < 16) ? "[SEQ CALLBACK]" : "[PAD CALLBACK]";
+    int display_slot = (seq->sequencer_slot < 16) ? seq->sequencer_slot : (seq->sequencer_slot - 16);
 
     std::cout << prefix << " slot=" << display_slot
               << " note=" << note << " vel=" << velocity << " on=" << on << std::endl;
@@ -72,8 +72,8 @@ static void sequence_loop_callback(void* userdata) {
 
         Phrase& phrase = seq->phrases[seq->current_phrase_index];
 
-        // Distinguish between pad slots (0-31) and sequence slots (32+)
-        const char* prefix = (seq->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
+        // Slot layout: 0-15 = uploaded sequences, 16-31 = pads
+        const char* prefix = (seq->sequencer_slot < 16) ? "[SEQ]" : "[PAD]";
 
         // If loop_count is 0, stay on this phrase forever
         if (phrase.loop_count == 0) {
@@ -256,14 +256,14 @@ void medness_sequence_play(MednessSequence* player) {
     if (!player || !player->sequencer) return;
 
     if (player->phrases.empty()) {
-        const char* prefix = (player->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
+        const char* prefix = (player->sequencer_slot < 16) ? "[SEQ]" : "[PAD]";
         std::cerr << prefix << " Cannot play: no phrases loaded" << std::endl;
         return;
     }
 
-    // Distinguish between pad slots (0-31) and sequence slots (32+)
-    const char* prefix = (player->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
-    int display_slot = (player->sequencer_slot < 32) ? player->sequencer_slot : (player->sequencer_slot - 32);
+    // Slot layout: 0-15 = uploaded sequences, 16-31 = pads
+    const char* prefix = (player->sequencer_slot < 16) ? "[SEQ]" : "[PAD]";
+    int display_slot = (player->sequencer_slot < 16) ? player->sequencer_slot : (player->sequencer_slot - 16);
 
     std::cout << prefix << " Starting playback with " << player->phrases.size() << " phrases (slot=" << display_slot << ")" << std::endl;
 
@@ -302,11 +302,11 @@ void medness_sequence_play(MednessSequence* player) {
 void medness_sequence_stop(MednessSequence* player) {
     if (!player || !player->sequencer) return;
 
-    // Distinguish between pad slots (0-31) and sequence slots (32+)
-    if (player->sequencer_slot < 32) {
-        std::cout << "[PAD] Stopping playback (pad slot=" << player->sequencer_slot << ")" << std::endl;
+    // Slot layout: 0-15 = uploaded sequences, 16-31 = pads
+    if (player->sequencer_slot < 16) {
+        std::cout << "[SEQ] Stopping playback (slot=" << player->sequencer_slot << ")" << std::endl;
     } else {
-        std::cout << "[SEQ] Stopping playback (seq slot=" << (player->sequencer_slot - 32) << ")" << std::endl;
+        std::cout << "[PAD] Stopping playback (slot=" << (player->sequencer_slot - 16) << ")" << std::endl;
     }
 
     player->playing = false;
@@ -418,4 +418,9 @@ MednessTrack* medness_sequence_get_current_track(MednessSequence* player) {
     if (player->current_phrase_index >= (int)player->phrases.size()) return nullptr;
 
     return player->phrases[player->current_phrase_index].track;
+}
+
+int medness_sequence_get_slot(MednessSequence* player) {
+    if (!player) return -1;
+    return player->sequencer_slot;
 }

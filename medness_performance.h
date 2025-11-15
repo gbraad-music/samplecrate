@@ -92,13 +92,15 @@ void medness_performance_jump_to_phrase(MednessPerformance* manager,
 MednessSequence* medness_performance_get_player(MednessPerformance* manager, int seq_index);
 
 // Load a pad with a MIDI file as a single-phrase sequence
-// pad_index: 0-31 (pads use sequence slots 0-31)
+// pad_index: 0-31 (pad identifier in RSX)
 // midi_file: absolute path to MIDI file
+// requested_slot: 0-15 for explicit slot assignment (P1-P16), -1 for dynamic allocation
 // callback_userdata: userdata to pass to MIDI callback (should contain pad_index and program info)
 // Returns: 0 on success, -1 on error
 int medness_performance_load_pad(MednessPerformance* manager,
                                    int pad_index,
                                    const char* midi_file,
+                                   int requested_slot,
                                    void* callback_userdata);
 
 // Unload a pad sequence

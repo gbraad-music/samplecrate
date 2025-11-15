@@ -375,8 +375,10 @@ void samplecrate_engine_load_pads(SamplecrateEngine* engine,
             pad_midi_contexts[i].visual_feedback_callback = visual_feedback_callback;
 
             // Load pad with engine's MIDI callback
+            // Get requested slot from RSX pad configuration (-1 = dynamic)
+            int requested_slot = engine->rsx->pads[i].slot;
             if (medness_performance_load_pad(engine->performance, i, midi_path,
-                                             &pad_midi_contexts[i]) == 0) {
+                                             requested_slot, &pad_midi_contexts[i]) == 0) {
                 std::cout << "  Pad " << (i + 1) << " loaded successfully (program "
                           << (prog + 1) << ")" << std::endl;
             } else {

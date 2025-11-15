@@ -127,6 +127,7 @@ SamplecrateRSX* samplecrate_rsx_create(void) {
         rsx->pads[i].enabled = 1;
         rsx->pads[i].program = -1;  // -1 = use current program
         rsx->pads[i].sequence_index = -1;  // -1 = no sequence trigger
+        rsx->pads[i].slot = -1;  // -1 = dynamic slot allocation
         rsx->pads[i].action = ACTION_NONE;
         rsx->pads[i].action_parameters[0] = '\0';
         rsx->pads[i].midi_trigger_note = -1;
@@ -572,6 +573,8 @@ int samplecrate_rsx_load(SamplecrateRSX* rsx, const char* filepath) {
                     rsx->pads[pad_idx].enabled = atoi(value);
                 } else if (strcmp(prop, "program") == 0) {
                     rsx->pads[pad_idx].program = atoi(value);
+                } else if (strcmp(prop, "slot") == 0) {
+                    rsx->pads[pad_idx].slot = atoi(value);
                 } else if (strcmp(prop, "midi_file") == 0) {
                     strncpy(rsx->pads[pad_idx].midi_file, value, sizeof(rsx->pads[pad_idx].midi_file) - 1);
                     rsx->pads[pad_idx].midi_file[sizeof(rsx->pads[pad_idx].midi_file) - 1] = '\0';
@@ -812,6 +815,10 @@ int samplecrate_rsx_save(SamplecrateRSX* rsx, const char* filepath) {
 
         if (rsx->pads[i].program >= 0) {
             fprintf(f, "pad_N%d_program=%d\n", pad_num, rsx->pads[i].program);
+        }
+
+        if (rsx->pads[i].slot >= 0) {
+            fprintf(f, "pad_N%d_slot=%d\n", pad_num, rsx->pads[i].slot);
         }
 
         if (rsx->pads[i].midi_file[0] != '\0') {

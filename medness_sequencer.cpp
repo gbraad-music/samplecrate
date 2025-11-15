@@ -8,7 +8,10 @@
 // At 24 PPQN: 64 sixteenths * 6 pulses/sixteenth = 384 pulses
 #define PATTERN_LENGTH_PULSES 384
 #define PATTERN_LENGTH_ROWS 64
-#define MAX_TRACK_SLOTS 16
+// Slot layout for programmable drum/beat computer:
+// - Slots 0-15: Uploaded sequences (SysEx remote control)
+// - Slots 16-31: Pads (local trigger pads)
+#define MAX_TRACK_SLOTS 32
 
 // Forward declaration
 static void medness_sequencer_play_tracks(MednessSequencer* sequencer, int old_pulse, int new_pulse);

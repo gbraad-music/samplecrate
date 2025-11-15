@@ -105,6 +105,10 @@ float medness_sequence_get_current_phrase_position(MednessSequence* player);
 typedef struct MednessTrack MednessTrack;
 MednessTrack* medness_sequence_get_current_track(MednessSequence* player);
 
+// Get the sequencer slot number assigned to this sequence
+// Returns -1 if no slot assigned (not playing or not assigned yet)
+int medness_sequence_get_slot(MednessSequence* player);
+
 #ifdef __cplusplus
 }
 #endif
