@@ -39,15 +39,19 @@ struct MednessSequence {
 static void sequence_midi_callback(int note, int velocity, int on, void* userdata) {
     MednessSequence* seq = (MednessSequence*)userdata;
     if (!seq) {
-        std::cout << "[SEQUENCE CALLBACK] ERROR: seq is NULL!" << std::endl;
+        std::cout << "[CALLBACK] ERROR: seq is NULL!" << std::endl;
         return;
     }
 
-    std::cout << "[SEQUENCE CALLBACK] slot=" << seq->sequencer_slot
+    // Distinguish between pad slots (0-31) and sequence slots (32+)
+    const char* prefix = (seq->sequencer_slot < 32) ? "[PAD CALLBACK]" : "[SEQ CALLBACK]";
+    int display_slot = (seq->sequencer_slot < 32) ? seq->sequencer_slot : (seq->sequencer_slot - 32);
+
+    std::cout << prefix << " slot=" << display_slot
               << " note=" << note << " vel=" << velocity << " on=" << on << std::endl;
 
     if (!seq->callback) {
-        std::cout << "[SEQUENCE CALLBACK] WARNING: No user callback set!" << std::endl;
+        std::cout << prefix << " WARNING: No user callback set!" << std::endl;
         return;
     }
 
@@ -68,9 +72,12 @@ static void sequence_loop_callback(void* userdata) {
 
         Phrase& phrase = seq->phrases[seq->current_phrase_index];
 
+        // Distinguish between pad slots (0-31) and sequence slots (32+)
+        const char* prefix = (seq->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
+
         // If loop_count is 0, stay on this phrase forever
         if (phrase.loop_count == 0) {
-            std::cout << "[SEQUENCE] Phrase " << seq->current_phrase_index
+            std::cout << prefix << " Phrase " << seq->current_phrase_index
                       << " (" << phrase.name << ") looping infinitely (loop #"
                       << seq->current_phrase_loop << ")" << std::endl;
             return;
@@ -78,7 +85,7 @@ static void sequence_loop_callback(void* userdata) {
 
         // Check if we've completed the required loops for this phrase
         if (seq->current_phrase_loop >= phrase.loop_count) {
-            std::cout << "[SEQUENCE] Phrase " << seq->current_phrase_index
+            std::cout << prefix << " Phrase " << seq->current_phrase_index
                       << " (" << phrase.name << ") completed "
                       << seq->current_phrase_loop << " loops" << std::endl;
 
@@ -89,11 +96,11 @@ static void sequence_loop_callback(void* userdata) {
             if (next_index >= (int)seq->phrases.size()) {
                 if (seq->sequence_loop) {
                     // Loop back to beginning
-                    std::cout << "[SEQUENCE] End of sequence, looping back to start" << std::endl;
+                    std::cout << prefix << " End of sequence, looping back to start" << std::endl;
                     next_index = 0;
                 } else {
                     // Stop playback
-                    std::cout << "[SEQUENCE] End of sequence, stopping" << std::endl;
+                    std::cout << prefix << " End of sequence, stopping" << std::endl;
                     seq->playing = false;
                     medness_sequencer_remove_track(seq->sequencer, seq->sequencer_slot);
                     return;
@@ -110,7 +117,7 @@ static void sequence_loop_callback(void* userdata) {
             if (seq->current_phrase_index < (int)seq->phrases.size()) {
                 Phrase& next_phrase = seq->phrases[seq->current_phrase_index];
 
-                std::cout << "[SEQUENCE] Starting phrase " << seq->current_phrase_index
+                std::cout << prefix << " Starting phrase " << seq->current_phrase_index
                           << " (" << next_phrase.name << ")" << std::endl;
 
                 // Add the new phrase track to sequencer
@@ -128,7 +135,7 @@ static void sequence_loop_callback(void* userdata) {
                 }
             }
         } else {
-            std::cout << "[SEQUENCE] Phrase " << seq->current_phrase_index
+            std::cout << prefix << " Phrase " << seq->current_phrase_index
                       << " (" << phrase.name << ") loop #"
                       << seq->current_phrase_loop << "/" << phrase.loop_count << std::endl;
         }
@@ -249,11 +256,16 @@ void medness_sequence_play(MednessSequence* player) {
     if (!player || !player->sequencer) return;
 
     if (player->phrases.empty()) {
-        std::cerr << "[SEQUENCE] Cannot play: no phrases loaded" << std::endl;
+        const char* prefix = (player->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
+        std::cerr << prefix << " Cannot play: no phrases loaded" << std::endl;
         return;
     }
 
-    std::cout << "[SEQUENCE] Starting playback with " << player->phrases.size() << " phrases" << std::endl;
+    // Distinguish between pad slots (0-31) and sequence slots (32+)
+    const char* prefix = (player->sequencer_slot < 32) ? "[PAD]" : "[SEQ]";
+    int display_slot = (player->sequencer_slot < 32) ? player->sequencer_slot : (player->sequencer_slot - 32);
+
+    std::cout << prefix << " Starting playback with " << player->phrases.size() << " phrases (slot=" << display_slot << ")" << std::endl;
 
     player->playing = true;
     player->current_phrase_index = 0;
@@ -262,13 +274,13 @@ void medness_sequence_play(MednessSequence* player) {
     // Start the first phrase by adding its track to the sequencer
     Phrase& first_phrase = player->phrases[0];
     if (first_phrase.track) {
-        std::cout << "[SEQUENCE] Starting phrase 0: " << first_phrase.name << std::endl;
+        std::cout << prefix << " Starting phrase 0: " << first_phrase.name << std::endl;
 
         // Debug: check track event count
         int event_count = 0;
         medness_track_get_events(first_phrase.track, &event_count);
-        std::cout << "[SEQUENCE] Track has " << event_count << " events" << std::endl;
-        std::cout << "[SEQUENCE] Adding track to sequencer slot " << player->sequencer_slot << std::endl;
+        std::cout << prefix << " Track has " << event_count << " events" << std::endl;
+        std::cout << prefix << " Adding track to sequencer (internal slot=" << player->sequencer_slot << ")" << std::endl;
 
         // Add track to sequencer with loop callback
         medness_sequencer_add_track(player->sequencer, player->sequencer_slot,
@@ -290,7 +302,12 @@ void medness_sequence_play(MednessSequence* player) {
 void medness_sequence_stop(MednessSequence* player) {
     if (!player || !player->sequencer) return;
 
-    std::cout << "[SEQUENCE] Stopping playback (slot=" << player->sequencer_slot << ")" << std::endl;
+    // Distinguish between pad slots (0-31) and sequence slots (32+)
+    if (player->sequencer_slot < 32) {
+        std::cout << "[PAD] Stopping playback (pad slot=" << player->sequencer_slot << ")" << std::endl;
+    } else {
+        std::cout << "[SEQ] Stopping playback (seq slot=" << (player->sequencer_slot - 32) << ")" << std::endl;
+    }
 
     player->playing = false;
 

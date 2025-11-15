@@ -108,16 +108,25 @@ int medness_sequencer_update(MednessSequencer* sequencer, int num_samples, int s
         }
     }
 
-    // If no tracks playing and no SPP sync, don't advance position
+    // If no tracks playing: reset position to 0 (unless externally synced to SPP)
+    // This ensures next trigger starts from the beginning
     if (!has_active_tracks) {
+        // TODO: Check if we're synced to external SPP - if so, keep position
+        // For now: always reset to 0 when nothing is playing
+        if (sequencer->pulse_count != 0) {
+            printf("[SEQUENCER] No active tracks - resetting position to 0\n");
+            sequencer->pulse_count = 0;
+            sequencer->accumulated_pulses = 0.0f;
+        }
         return -1;  // Return -1 to indicate sequencer is not running
     }
 
     int old_pulse = sequencer->pulse_count;
 
-    // Only advance position if NOT using external MIDI clock
-    // External clock advances via medness_sequencer_clock_pulse()
-    if (!sequencer->external_clock) {
+    // Always advance position using internal clock
+    // External MIDI clock only adjusts the BPM, doesn't control position directly
+    // (external_clock flag is deprecated - sequencer always runs on internal timebase)
+    {
         // Calculate how many pulses elapsed based on sample count
         double seconds_elapsed = (double)num_samples / (double)sample_rate;
         double pulses_per_second = (sequencer->bpm * 24.0) / 60.0;

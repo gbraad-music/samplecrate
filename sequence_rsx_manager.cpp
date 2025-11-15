@@ -74,7 +74,15 @@ int sequence_rsx_add_uploaded(SamplecrateRSX* rsx, uint8_t slot, uint8_t program
     snprintf(seq->name, sizeof(seq->name), "Upload Slot %d", slot);
     seq->enabled = 1;
     seq->loop = 1;  // Loop by default
-    seq->program_number = program;  // Target program
+
+    // Handle program number: 0x7F (127) means "follow current UI program" -> store as -1
+    if (program == 0x7F || program == 127) {
+        seq->program_number = -1;  // -1 = follow current UI program
+        printf("[SeqRSXManager] Program set to -1 (follow current UI program)\n");
+    } else {
+        seq->program_number = program;  // Target specific program (0-based)
+    }
+
     seq->slot = slot;  // Store slot number explicitly
 
     // Add phrase pointing to uploaded MIDI file
@@ -85,7 +93,7 @@ int sequence_rsx_add_uploaded(SamplecrateRSX* rsx, uint8_t slot, uint8_t program
     seq->phrases[0].loop_count = 0;  // 0 = infinite loop
 
     printf("[SeqRSXManager] Added sequence %d: %s -> %s (program %d)\n",
-           seq_idx, seq->name, seq->phrases[0].midi_file, program);
+           seq_idx, seq->name, seq->phrases[0].midi_file, seq->program_number);
 
     // Save RSX file to persist changes
     if (rsx_path && rsx_path[0] != '\0') {

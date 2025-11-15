@@ -163,6 +163,10 @@ struct {
     uint64_t last_bpm_calc_time = 0; // Last BPM calculation time
     int spp_position = 0;         // Song Position Pointer (in 16th notes / MIDI beats)
     bool spp_synced = false;      // True if we've received SPP and synced to it
+
+    // Consecutive rejection tracking (for accepting large tempo changes)
+    float last_rejected_bpm = 0.0f;  // Last rejected BPM value
+    int consecutive_rejections = 0;   // How many times we rejected similar BPM
 } midi_clock;
 
 // Error message for LCD display
@@ -1784,13 +1788,13 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
             last_report_time = now;
         }
 
-        // Enable external clock mode on sequencer (single source of truth)
+        // First MIDI clock pulse - start tracking tempo for BPM adjustment
         if (sequencer && !midi_clock.active) {
-            // std::cout << "[MIDI CLOCK] Switching to external clock mode" << std::endl;
-            medness_sequencer_set_external_clock(sequencer, 1);
+            // std::cout << "[MIDI CLOCK] First clock pulse - starting BPM tracking" << std::endl;
+            // Sequencer always uses internal clock - MIDI clock only adjusts BPM (no external_clock mode)
 
-            // Reset BPM smoothing filter when first enabling external clock
-            // This ensures we start fresh with the new clock source
+            // Reset BPM smoothing filter when first receiving external clock
+            // This ensures we start fresh with the new tempo source
             midi_clock.bpm = 0.0f;
             midi_clock.smoothed_bpm = 0.0f;
         }
@@ -1798,12 +1802,11 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         if (midi_clock.last_clock_time > 0) {
             uint64_t interval = now - midi_clock.last_clock_time;
 
-            // Forward clock pulse to sequencer (it manages the pattern position)
-            if (sequencer) {
-                medness_sequencer_clock_pulse(sequencer);
-            }
+            // DON'T forward clock pulse to sequencer - sequencer uses internal clock only
+            // External MIDI clock only adjusts BPM, doesn't control position
+            // (This was causing double-speed playback when both clocks were active)
 
-            // Increment total pulse count for sub-beat precision
+            // Increment total pulse count for sub-beat precision (for SPP calculations)
             midi_clock.total_pulse_count++;
 
             // Calculate BPM every 24 pulses (one quarter note)
@@ -1814,40 +1817,101 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
                 if (total_time > 0) {
                     float raw_bpm = 60000000.0f / total_time;
 
-                    // Smooth BPM using exponential moving average to reduce jitter
-                    // Alpha = 0.3 gives moderate smoothing (lower = more smoothing)
-                    if (midi_clock.smoothed_bpm == 0.0f) {
-                        midi_clock.smoothed_bpm = raw_bpm;  // Initialize on first reading
-                    } else {
-                        midi_clock.smoothed_bpm = midi_clock.smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
+                    // Reject extreme BPM values that are too far from current tempo
+                    // This prevents sync glitches (timeouts, gaps) from causing wild tempo swings
+                    // Accept range: ±20% of current BPM (e.g., 100-150 BPM if current is 125)
+                    // EXCEPTION: If we get 3 consecutive readings at the same BPM, accept it
+                    // (this indicates an intentional tempo change, not a glitch)
+                    const float BPM_CHANGE_THRESHOLD = 0.20f;  // 20% tolerance
+                    const int CONSECUTIVE_ACCEPT_COUNT = 3;     // Accept after 3 consistent readings
+                    bool accept_bpm = true;
+
+                    if (midi_clock.smoothed_bpm > 0.0f) {  // Have existing tempo reference
+                        float change_ratio = fabs(raw_bpm - midi_clock.smoothed_bpm) / midi_clock.smoothed_bpm;
+                        if (change_ratio > BPM_CHANGE_THRESHOLD) {
+                            // Check if this BPM is similar to previously rejected values
+                            // (within 5% of last rejected BPM = consistent reading)
+                            bool is_consistent = false;
+                            if (midi_clock.last_rejected_bpm > 0.0f) {
+                                float rejection_similarity = fabs(raw_bpm - midi_clock.last_rejected_bpm) / midi_clock.last_rejected_bpm;
+                                is_consistent = (rejection_similarity < 0.05f);  // Within 5% = same tempo
+                            }
+
+                            if (is_consistent) {
+                                midi_clock.consecutive_rejections++;
+
+                                // After N consecutive rejections of the same BPM, accept it
+                                if (midi_clock.consecutive_rejections >= CONSECUTIVE_ACCEPT_COUNT) {
+                                    std::cout << "[MIDI CLOCK] Accepting BPM " << raw_bpm
+                                              << " after " << midi_clock.consecutive_rejections << " consistent readings "
+                                              << "(change: " << (change_ratio * 100.0f) << "% from " << midi_clock.smoothed_bpm << ")" << std::endl;
+                                    accept_bpm = true;
+                                    midi_clock.consecutive_rejections = 0;  // Reset counter
+                                    midi_clock.last_rejected_bpm = 0.0f;
+                                } else {
+                                    std::cout << "[MIDI CLOCK] Rejecting BPM " << raw_bpm
+                                              << " (change: " << (change_ratio * 100.0f) << "% from " << midi_clock.smoothed_bpm
+                                              << ", threshold: " << (BPM_CHANGE_THRESHOLD * 100.0f) << "%, "
+                                              << midi_clock.consecutive_rejections << "/" << CONSECUTIVE_ACCEPT_COUNT << " consistent)" << std::endl;
+                                    accept_bpm = false;
+                                    midi_clock.last_rejected_bpm = raw_bpm;  // Track this rejection
+                                }
+                            } else {
+                                // Different BPM than before - reset counter
+                                std::cout << "[MIDI CLOCK] Rejecting BPM " << raw_bpm
+                                          << " (change: " << (change_ratio * 100.0f) << "% from " << midi_clock.smoothed_bpm
+                                          << ", threshold: " << (BPM_CHANGE_THRESHOLD * 100.0f) << "%)" << std::endl;
+                                accept_bpm = false;
+                                midi_clock.consecutive_rejections = 1;
+                                midi_clock.last_rejected_bpm = raw_bpm;
+                            }
+                        } else {
+                            // BPM within threshold - reset rejection tracking
+                            midi_clock.consecutive_rejections = 0;
+                            midi_clock.last_rejected_bpm = 0.0f;
+                        }
                     }
 
-                    float new_bpm = midi_clock.smoothed_bpm;
+                    float new_bpm = midi_clock.smoothed_bpm;  // Default: keep current
 
-                    // Update BPM value
-                    bool bpm_changed = fabs(new_bpm - midi_clock.bpm) > 0.1f;
-                    midi_clock.bpm = new_bpm;
+                    if (accept_bpm) {
+                        // Smooth BPM using exponential moving average to reduce jitter
+                        // Alpha = 0.3 gives moderate smoothing (lower = more smoothing)
+                        if (midi_clock.smoothed_bpm == 0.0f) {
+                            midi_clock.smoothed_bpm = raw_bpm;  // Initialize on first reading
+                        } else {
+                            midi_clock.smoothed_bpm = midi_clock.smoothed_bpm * 0.7f + raw_bpm * 0.3f;  // Exponential moving average
+                        }
 
-                    if (bpm_changed) {
-                        std::cout << "MIDI CLOCK: BPM = " << new_bpm
-                                  << " (raw: " << raw_bpm << ", smoothed, interval=" << total_time << "us)" << std::endl;
+                        new_bpm = midi_clock.smoothed_bpm;
                     }
 
-                    // Always update active playback tempo if sync is enabled
-                    if (config.midi_clock_tempo_sync == 1) {
-                        active_bpm = midi_clock.bpm;  // Update active playback tempo
-                        tempo_bpm = midi_clock.bpm;   // Update UI slider to match
+                    // Only update BPM and apply changes if we accepted this reading
+                    if (accept_bpm) {
+                        bool bpm_changed = fabs(new_bpm - midi_clock.bpm) > 0.1f;
+                        midi_clock.bpm = new_bpm;
 
-                        // Only update sequencer/player if BPM actually changed
-                        if (bpm_changed && performance) {
-                            if (sequencer) {
-                                medness_sequencer_set_bpm(sequencer, active_bpm);
+                        if (bpm_changed) {
+                            std::cout << "MIDI CLOCK: BPM = " << new_bpm
+                                      << " (raw: " << raw_bpm << ", smoothed, interval=" << total_time << "us)" << std::endl;
+                        }
+
+                        // Always update active playback tempo if sync is enabled
+                        if (config.midi_clock_tempo_sync == 1) {
+                            active_bpm = midi_clock.bpm;  // Update active playback tempo
+                            tempo_bpm = midi_clock.bpm;   // Update UI slider to match
+
+                            // Only update sequencer/player if BPM actually changed
+                            if (bpm_changed && performance) {
+                                if (sequencer) {
+                                    medness_sequencer_set_bpm(sequencer, active_bpm);
+                                }
+                                medness_performance_set_tempo(performance, active_bpm);
+                                if (sequence_manager) {
+                                    medness_performance_set_tempo(sequence_manager, active_bpm);
+                                }
+                                std::cout << "  -> active_bpm/tempo_bpm updated to " << active_bpm << std::endl;
                             }
-                            medness_performance_set_tempo(performance, active_bpm);
-                            if (sequence_manager) {
-                                medness_performance_set_tempo(sequence_manager, active_bpm);
-                            }
-                            std::cout << "  -> active_bpm/tempo_bpm updated to " << active_bpm << std::endl;
                         }
                     }
                 }
@@ -1889,11 +1953,8 @@ void midi_event_callback(unsigned char status, unsigned char data1, unsigned cha
         midi_clock.bpm = 0.0f;  // Reset BPM to prevent displaying stale values
         midi_clock.smoothed_bpm = 0.0f;  // Reset smoothing filter
 
-        // Switch sequencer back to internal clock
-        if (sequencer) {
-            // std::cout << "[MIDI CLOCK] Switching to internal clock mode" << std::endl;
-            medness_sequencer_set_external_clock(sequencer, 0);
-        }
+        // Sequencer continues on internal clock (no external_clock mode to switch)
+        // Just stop receiving BPM adjustments from MIDI clock
 
         // std::cout << "MIDI Stop received" << std::endl;
         return;
@@ -2246,33 +2307,45 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
     // This runs in the audio thread for perfect timing (no UI blocking!)
     // The MIDI event callbacks will acquire the lock themselves
     if (performance) {
-        // Check for MIDI clock timeout (fall back to internal clock if no pulses received)
+        // Check for MIDI clock timeout (stop showing [SYNC] but keep BPM)
+        // Internal clock continues at last known BPM - we never "fall back"
         if (midi_clock.active && midi_clock.last_clock_time > 0) {
             uint64_t now = get_microseconds();
             uint64_t time_since_last_pulse = now - midi_clock.last_clock_time;
             const uint64_t CLOCK_TIMEOUT_US = 1000000; // 1 second timeout
 
             if (time_since_last_pulse > CLOCK_TIMEOUT_US) {
-                printf("[MIDI CLOCK] Timeout detected (%llu us since last pulse) - falling back to internal clock\n",
-                       (unsigned long long)time_since_last_pulse);
-                midi_clock.active = false;
-                midi_clock.running = false;
-                if (sequencer) {
-                    medness_sequencer_set_external_clock(sequencer, 0);
+                // Just clear the [SYNC] indicator - don't disable clock or stop BPM adjustment
+                // Internal clock continues at last known BPM
+                if (midi_clock.active) {
+                    printf("[MIDI CLOCK] Sync lost (no pulses for %llu us) - continuing at last BPM %.1f\n",
+                           (unsigned long long)time_since_last_pulse, midi_clock.smoothed_bpm);
                 }
+                midi_clock.active = false;
+
+                // Reset smoothing filter to prevent stale data from corrupting next sync
+                // When clock reconnects, the first pulse will have a huge interval (time since last pulse)
+                // which would calculate an extremely slow BPM. By resetting the filter, we start fresh.
+                midi_clock.smoothed_bpm = 0.0f;
+                midi_clock.pulse_count = 0;  // Reset pulse counter too
+
+                // Keep running state and BPM - internal clock continues
+                // DON'T call medness_sequencer_set_external_clock - sequencer always uses internal clock
             }
         }
 
         // Get pattern position from sequencer (single source of truth)
-        // Sequencer handles internal timing advancement
+        // Sequencer ALWAYS uses internal clock - external MIDI clock only adjusts BPM
         int current_pulse = -1;
         if (sequencer && medness_sequencer_is_active(sequencer)) {
-            // Update sequencer - it will advance position based on its clock mode
+            // Update sequencer - always advances based on internal clock at current BPM
+            // MIDI clock pulses adjust the BPM but don't directly control position
             current_pulse = medness_sequencer_update(sequencer, frames, 44100);
 
-            // Debug: log sequencer position and BPM every 96 pulses (every bar)
+            // Debug: log first 10 pulses immediately, then every 96 pulses
+            static int debug_pulse_count = 0;
             static int last_debug_pulse = -1;
-            if (current_pulse >= 0 && current_pulse / 96 != last_debug_pulse / 96) {
+            if (current_pulse >= 0 && (debug_pulse_count < 10 || current_pulse / 96 != last_debug_pulse / 96)) {
                 float sequencer_bpm = medness_sequencer_get_bpm(sequencer);
                 std::cout << "[SEQUENCER] pulse=" << current_pulse
                           << " row=" << medness_sequencer_get_row(sequencer)
@@ -2280,6 +2353,16 @@ void audioCallback(void* userdata, Uint8* stream, int len) {
                           << " (external_clock=" << (midi_clock.active ? "YES" : "NO") << ")"
                           << std::endl;
                 last_debug_pulse = current_pulse;
+                if (debug_pulse_count < 10) debug_pulse_count++;
+            }
+        } else if (sequencer) {
+            // Debug: why isn't sequencer updating?
+            static int stuck_count = 0;
+            if (stuck_count < 3) {
+                std::cout << "[SEQUENCER] NOT ACTIVE or external_clock stuck (active="
+                          << medness_sequencer_is_active(sequencer)
+                          << " midi_clock.active=" << midi_clock.active << ")" << std::endl;
+                stuck_count++;
             }
         }
 
@@ -2440,10 +2523,14 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
 
     // Extract target program from userdata (if provided by sequence)
-    // Otherwise fall back to current_program (for backwards compatibility)
-    int target_program = current_program;
+    // -1 means "follow current UI program", otherwise use the specific program
+    int target_program = current_program;  // Default: follow UI
     if (userdata) {
-        target_program = *(int*)userdata;
+        int seq_program = *(int*)userdata;
+        if (seq_program >= 0) {
+            target_program = seq_program;  // Use specific program
+        }
+        // else: seq_program == -1, use current_program (already set above)
     }
 
     printf("[MIDI CALLBACK] note=%d vel=%d on=%d program=%d\n", note, velocity, on, target_program);
@@ -2460,6 +2547,12 @@ void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
 }
 
 int main(int argc, char* argv[]) {
+    // Force internal clock mode at startup (reset any stale MIDI clock state)
+    midi_clock.active = false;
+    midi_clock.running = false;
+    midi_clock.last_clock_time = 0;
+    std::cout << "[STARTUP] Forcing internal clock mode (midi_clock.active=false)" << std::endl;
+
     // Check for SFZ or RSX file argument
     const char* sfz_file = "assets/example.sfz";  // default
     std::string sfz_filename = "example.sfz";  // Just the filename for display
@@ -2615,6 +2708,7 @@ int main(int argc, char* argv[]) {
     if (sequencer) {
         medness_sequencer_set_bpm(sequencer, 125.0f);  // Default BPM
         medness_sequencer_set_active(sequencer, 1);    // Always active
+        // Sequencer always uses internal clock - external MIDI clock only adjusts BPM
     }
 
     // Create engine (contains all audio/MIDI state for headless operation)
@@ -5697,7 +5791,14 @@ int main(int argc, char* argv[]) {
                             pp.events = events;
                             pp.event_count = event_count;
                             pp.tpqn = tpqn;
-                            pp.program_num = 0;  // TODO: get from sequence
+                            // Get program number from RSX sequence
+                            // -1 means "follow current UI program"
+                            int seq_prog = rsx->sequences[seq_idx].program_number;
+                            if (seq_prog >= 0) {
+                                pp.program_num = seq_prog + 1;  // Convert to 1-based for display
+                            } else {
+                                pp.program_num = current_program + 1;  // Follow current UI program
+                            }
                             playing_pads.push_back(pp);
                         }
                     }

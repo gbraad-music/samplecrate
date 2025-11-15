@@ -310,10 +310,12 @@ void medness_performance_set_midi_callback(MednessPerformance* manager,
     manager->midi_callback = callback;
     manager->midi_userdata = userdata;
 
-    // Update all sequence players
+    // Update all sequence players with the callback
+    // BUT keep their individual program-specific userdata (stored in sequence_programs[])
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            medness_sequence_set_callback(manager->players[i], callback, userdata);
+            // Use per-sequence program number as userdata, not the manager's global userdata
+            medness_sequence_set_callback(manager->players[i], callback, &manager->sequence_programs[i]);
         }
     }
 }
