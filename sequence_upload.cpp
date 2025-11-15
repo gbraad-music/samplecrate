@@ -117,19 +117,37 @@ int sequence_upload_chunk(uint8_t slot, uint8_t chunk_num, const uint8_t *encode
     size_t num_blocks = encoded_len / 8;
     size_t decoded_len = num_blocks * 7;
 
-    // Truncate to remaining file size (removes 7-bit encoding padding in last chunk)
-    size_t bytes_to_write = decoded_len;
-    if (session->buffer_pos + decoded_len > session->file_size) {
-        bytes_to_write = session->file_size - session->buffer_pos;
-        printf("[SequenceUpload] Truncating last chunk: %zu → %zu bytes (padding removed)\n",
-               decoded_len, bytes_to_write);
-    }
-
-    // Decode chunk (decode full block, then use only what we need)
+    // Decode chunk first
     uint8_t temp_buffer[512];  // Temporary buffer for full decoded chunk
     decode_7bit_to_8bit(encoded_data, temp_buffer, num_blocks);
 
-    // Copy only the bytes we need (truncates padding in last chunk)
+    // Calculate how many bytes we actually need from this chunk
+    // This removes 7-bit encoding padding on a per-chunk basis
+    size_t bytes_remaining = session->file_size - session->buffer_pos;
+    size_t bytes_to_write = (decoded_len < bytes_remaining) ? decoded_len : bytes_remaining;
+
+    // For non-final chunks, remove padding from this chunk
+    // Padding exists when decoded_len is not a multiple of 7 from the original data
+    if (chunk_num < session->total_chunks - 1) {
+        // Non-final chunk: should be exactly CHUNK_SIZE (256) bytes of real data
+        // But decoding adds padding: ceil(256/7)*7 = 37*7 = 259 bytes
+        // So for 256-byte chunks, always use exactly 256 bytes, not 259
+        const size_t CHUNK_SIZE = 256;
+        if (bytes_to_write > CHUNK_SIZE) {
+            printf("[SequenceUpload] Chunk %d: Removing %zu bytes of padding (%zu → %zu)\n",
+                   chunk_num, bytes_to_write - CHUNK_SIZE, bytes_to_write, CHUNK_SIZE);
+            bytes_to_write = CHUNK_SIZE;
+        }
+    } else {
+        // Final chunk: write exactly what's needed to reach file_size
+        if (decoded_len > bytes_remaining) {
+            printf("[SequenceUpload] Final chunk: Truncating %zu → %zu bytes (padding removed)\n",
+                   decoded_len, bytes_remaining);
+            bytes_to_write = bytes_remaining;
+        }
+    }
+
+    // Copy only the real data bytes (no padding)
     memcpy(session->buffer + session->buffer_pos, temp_buffer, bytes_to_write);
     session->buffer_pos += bytes_to_write;
     session->chunks_received++;
