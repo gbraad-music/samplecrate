@@ -1465,7 +1465,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
         }
 
         case SYSEX_CMD_SEQUENCE_TRACK_STOP: {
-            // F0 7D <dev> 83 <slot> F7
+            // F0 7D <dev> 45 <slot> F7
             if (data_len < 1) {
                 printf("[SysEx] SEQUENCE_TRACK_STOP: insufficient data\n");
                 break;
@@ -1474,13 +1474,27 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             uint8_t slot = data[0] & 0x0F;
             printf("[SysEx] SEQUENCE_TRACK_STOP: slot=%d\n", slot);
 
-            // TODO: Stop sequence playback
-            printf("[SysEx] Sequence stop not yet implemented\n");
+            // Check if sequence_manager is initialized
+            if (!sequence_manager) {
+                printf("[SysEx] SEQUENCE_TRACK_STOP: sequence_manager not initialized\n");
+                break;
+            }
+
+            // Find the sequence index for this slot in RSX
+            int seq_idx = sequence_rsx_find_slot(rsx, slot);
+            if (seq_idx < 0) {
+                printf("[SysEx] SEQUENCE_TRACK_STOP: No sequence found for slot %d\n", slot);
+                break;
+            }
+
+            // Stop the sequence
+            medness_performance_stop(sequence_manager, seq_idx);
+            printf("[SysEx] Stopped sequence %d (slot %d)\n", seq_idx, slot);
             break;
         }
 
         case SYSEX_CMD_SEQUENCE_TRACK_MUTE: {
-            // F0 7D <dev> 84 <slot> <mute> F7
+            // F0 7D <dev> 46 <slot> <mute> F7
             // mute: 0=UNMUTE, 1=MUTE
             if (data_len < 2) {
                 printf("[SysEx] SEQUENCE_TRACK_MUTE: insufficient data\n");
@@ -1492,14 +1506,30 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             printf("[SysEx] SEQUENCE_TRACK_MUTE: slot=%d mute=%s\n",
                    slot, mute ? "MUTE" : "UNMUTE");
 
-            // TODO: Mute/unmute sequence track
-            printf("[SysEx] Sequence mute not yet implemented\n");
+            // Check if sequence_manager is initialized
+            if (!sequence_manager) {
+                printf("[SysEx] SEQUENCE_TRACK_MUTE: sequence_manager not initialized\n");
+                break;
+            }
+
+            // Find the sequence index for this slot in RSX
+            int seq_idx = sequence_rsx_find_slot(rsx, slot);
+            if (seq_idx < 0) {
+                printf("[SysEx] SEQUENCE_TRACK_MUTE: No sequence found for slot %d\n", slot);
+                break;
+            }
+
+            // Set mute state for the sequence
+            medness_performance_set_mute(sequence_manager, seq_idx, mute);
+            printf("[SysEx] %s sequence %d (slot %d)\n",
+                   mute ? "Muted" : "Unmuted", seq_idx, slot);
             break;
         }
 
         case SYSEX_CMD_SEQUENCE_TRACK_SOLO: {
-            // F0 7D <dev> 85 <slot> <solo> F7
+            // F0 7D <dev> 47 <slot> <solo> F7
             // solo: 0=UNSOLO, 1=SOLO
+            // SOLO = ONLY ONE: When soloing a slot, all other slots get muted
             if (data_len < 2) {
                 printf("[SysEx] SEQUENCE_TRACK_SOLO: insufficient data\n");
                 break;
@@ -1510,8 +1540,23 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             printf("[SysEx] SEQUENCE_TRACK_SOLO: slot=%d solo=%s\n",
                    slot, solo ? "SOLO" : "UNSOLO");
 
-            // TODO: Solo/unsolo sequence track
-            printf("[SysEx] Sequence solo not yet implemented\n");
+            // Check if sequence_manager is initialized
+            if (!sequence_manager) {
+                printf("[SysEx] SEQUENCE_TRACK_SOLO: sequence_manager not initialized\n");
+                break;
+            }
+
+            // Find the sequence index for this slot in RSX
+            int seq_idx = sequence_rsx_find_slot(rsx, slot);
+            if (seq_idx < 0) {
+                printf("[SysEx] SEQUENCE_TRACK_SOLO: No sequence found for slot %d\n", slot);
+                break;
+            }
+
+            // Set solo state for the sequence
+            medness_performance_set_solo(sequence_manager, seq_idx, solo);
+            printf("[SysEx] %s sequence %d (slot %d)\n",
+                   solo ? "Solo'd" : "Un-solo'd", seq_idx, slot);
             break;
         }
 
@@ -1701,6 +1746,143 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
                     printf("[SysEx] SEQUENCE_TRACK_DOWNLOAD: Unknown subcommand 0x%02X\n", subcommand);
                     break;
             }
+            break;
+        }
+
+        case SYSEX_CMD_GET_SEQUENCE_STATE: {
+            // F0 7D <dev> 62 F7
+            // Request complete sequence state (all slots)
+            printf("[SysEx] GET_SEQUENCE_STATE: Building state response\n");
+
+            if (!sequence_manager || !rsx) {
+                printf("[SysEx] GET_SEQUENCE_STATE: sequence_manager or RSX not initialized\n");
+                break;
+            }
+
+            // Build SEQUENCE_STATE_RESPONSE (0x63)
+            uint8_t sysex_buffer[256];
+
+            sysex_buffer[0] = SYSEX_START;
+            sysex_buffer[1] = SYSEX_MANUFACTURER_ID;
+            sysex_buffer[2] = device_id;
+            sysex_buffer[3] = SYSEX_CMD_SEQUENCE_STATE_RESPONSE;
+
+            // State data structure (70 bytes)
+            int offset = 4;
+
+            // Byte 0: Version (0x20 = Samplecrate format)
+            sysex_buffer[offset++] = 0x20;
+
+            // Byte 1: Number of sequence slots
+            sysex_buffer[offset++] = RSX_MAX_SEQUENCES;  // 16
+
+            // Byte 2: Start mode (0=immediate, 1=quantized)
+            SequenceStartMode start_mode = medness_performance_get_start_mode(sequence_manager);
+            sysex_buffer[offset++] = (uint8_t)start_mode;
+
+            // Byte 3: Reserved
+            sysex_buffer[offset++] = 0x00;
+
+            // Bytes 4-5: Sequence slot mute bits (2 bytes, bit-packed)
+            // SOLO is inferred: if only one bit is 0, that slot is solo'd
+            // IMPORTANT: Indexed by SLOT number, not RSX sequence index
+            uint8_t mute_byte_0 = 0;  // Slots 0-7
+            uint8_t mute_byte_1 = 0;  // Slots 8-15
+
+            for (int slot = 0; slot < 8; slot++) {
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0 && !medness_performance_is_audible(sequence_manager, seq_idx)) {
+                    mute_byte_0 |= (1 << slot);
+                }
+            }
+            for (int slot = 8; slot < RSX_MAX_SEQUENCES; slot++) {
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0 && !medness_performance_is_audible(sequence_manager, seq_idx)) {
+                    mute_byte_1 |= (1 << (slot - 8));
+                }
+            }
+
+            sysex_buffer[offset++] = mute_byte_0;
+            sysex_buffer[offset++] = mute_byte_1;
+
+            // Bytes 6-21: Slot flags (16 bytes)
+            // IMPORTANT: Iterate by SLOT number, not RSX sequence index
+            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+                uint8_t flags = 0;
+
+                // Find which RSX sequence (if any) is in this slot
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0) {
+                    MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
+                    if (seq) {
+                        flags |= 0x01;  // bit 0: Loaded
+
+                        if (medness_performance_is_playing(sequence_manager, seq_idx)) {
+                            flags |= 0x02;  // bit 1: Playing
+                        }
+
+                        // bit 2-3: Reserved
+
+                        if (medness_sequence_get_loop(seq)) {
+                            flags |= 0x10;  // bit 4: Looping
+                        }
+
+                        // bit 5-7: Reserved
+                    }
+                }
+
+                sysex_buffer[offset++] = flags;
+            }
+
+            // Bytes 22-37: Program numbers (16 bytes)
+            // IMPORTANT: Iterate by SLOT number
+            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0) {
+                    sysex_buffer[offset++] = rsx->sequences[seq_idx].program_number & 0x7F;
+                } else {
+                    sysex_buffer[offset++] = 0x7F;  // Not loaded
+                }
+            }
+
+            // Bytes 38-53: Current phrase index (16 bytes)
+            // IMPORTANT: Iterate by SLOT number
+            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0) {
+                    MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
+                    if (seq) {
+                        int phrase_idx = medness_sequence_get_current_phrase(seq);
+                        sysex_buffer[offset++] = (phrase_idx >= 0) ? (uint8_t)phrase_idx : 0x7F;
+                    } else {
+                        sysex_buffer[offset++] = 0x7F;
+                    }
+                } else {
+                    sysex_buffer[offset++] = 0x7F;  // Not loaded
+                }
+            }
+
+            // Bytes 54-69: Total phrases (16 bytes)
+            // IMPORTANT: Iterate by SLOT number
+            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+                int seq_idx = sequence_rsx_find_slot(rsx, slot);
+                if (seq_idx >= 0) {
+                    MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
+                    if (seq) {
+                        int phrase_count = medness_sequence_get_phrase_count(seq);
+                        sysex_buffer[offset++] = (phrase_count > 0) ? (uint8_t)phrase_count : 0x7F;
+                    } else {
+                        sysex_buffer[offset++] = 0x7F;
+                    }
+                } else {
+                    sysex_buffer[offset++] = 0x7F;  // Not loaded
+                }
+            }
+
+            sysex_buffer[offset++] = SYSEX_END;
+
+            midi_output_send_sysex(sysex_buffer, offset);
+            printf("[SysEx] Sent SEQUENCE_STATE_RESPONSE (%d bytes)\n", offset);
             break;
         }
 
@@ -2525,18 +2707,38 @@ void pad_visual_feedback(int pad_index, int note, int velocity, int on) {
 }
 
 // MIDI file player callback for sequences (not pads)
+// Context for MIDI callbacks - includes sequence index and program number
+struct SequenceMIDIContext {
+    int seq_index;   // Sequence index (for mute/solo checking)
+    int program;     // Target program number
+};
+
 void midi_file_event_callback(int note, int velocity, int on, void* userdata) {
     std::lock_guard<std::mutex> lock(synth_mutex);
 
-    // Extract target program from userdata (if provided by sequence)
-    // -1 means "follow current UI program", otherwise use the specific program
+    // Extract sequence index and program from userdata
+    int seq_index = -1;
     int target_program = current_program;  // Default: follow UI
+
     if (userdata) {
-        int seq_program = *(int*)userdata;
+        // Check if this is a SequenceMIDIContext (from sequences) or just a program pointer (legacy/pads)
+        // For now, assume it's always SequenceMIDIContext for sequences
+        SequenceMIDIContext* ctx = (SequenceMIDIContext*)userdata;
+        seq_index = ctx->seq_index;
+        int seq_program = ctx->program;
+
         if (seq_program >= 0) {
             target_program = seq_program;  // Use specific program
         }
         // else: seq_program == -1, use current_program (already set above)
+    }
+
+    // Check mute/solo state for sequences
+    if (seq_index >= 0 && sequence_manager) {
+        if (!medness_performance_is_audible(sequence_manager, seq_index)) {
+            // Sequence is muted or not soloed - suppress note
+            return;
+        }
     }
 
     // printf("[MIDI CALLBACK] note=%d vel=%d on=%d program=%d\n", note, velocity, on, target_program);

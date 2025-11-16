@@ -116,6 +116,19 @@ int medness_performance_load_pad(MednessPerformance* manager,
 // Unload a pad sequence
 void medness_performance_unload_pad(MednessPerformance* manager, int pad_index);
 
+// Set mute state for a sequence (0-based index)
+// muted: 1=mute, 0=unmute
+void medness_performance_set_mute(MednessPerformance* manager, int seq_index, int muted);
+
+// Set solo state for a sequence (0-based index)
+// soloed: 1=solo, 0=unsolo
+// When ANY sequence is soloed, all non-soloed sequences are muted
+void medness_performance_set_solo(MednessPerformance* manager, int seq_index, int soloed);
+
+// Check if a sequence should be audible (based on mute/solo state)
+// Returns: 1 if audible, 0 if should be silent
+int medness_performance_is_audible(MednessPerformance* manager, int seq_index);
+
 #ifdef __cplusplus
 }
 #endif

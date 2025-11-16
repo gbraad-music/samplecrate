@@ -63,6 +63,9 @@ typedef enum {
     SYSEX_CMD_SEQUENCE_TRACK_LIST              = 0x4B,  // List occupied slots
     SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD          = 0x4C,  // Download track (subcommand: 0=START, 1=GET_CHUNK, 2=COMPLETE)
     SYSEX_CMD_SEQUENCE_TRACK_DOWNLOAD_RESPONSE = 0x4D,  // Download response (subcommand, slot, data)
+    // State query commands (0x60-0x6F)
+    SYSEX_CMD_GET_SEQUENCE_STATE               = 0x62,  // Request complete sequence state (all slots)
+    SYSEX_CMD_SEQUENCE_STATE_RESPONSE          = 0x63,  // Complete sequence state response
 } SysExCommand;
 
 // Effect IDs for FX_EFFECT_GET/SET commands

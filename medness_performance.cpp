@@ -6,6 +6,12 @@
 #include <libgen.h>
 #include <iostream>
 
+// Context for MIDI callbacks - includes sequence index and program number
+struct SequenceMIDIContext {
+    int seq_index;   // Sequence index (for mute/solo checking)
+    int program;     // Target program number
+};
+
 // Queued sequence info
 typedef struct {
     int active;           // Is this queue entry active?
@@ -38,6 +44,9 @@ struct MednessPerformance {
     // Per-sequence program numbers (for routing MIDI to correct synth)
     int sequence_programs[RSX_MAX_SEQUENCES];
 
+    // MIDI callback contexts for sequences (includes seq_index + program)
+    SequenceMIDIContext sequence_contexts[RSX_MAX_SEQUENCES];
+
     // Dynamic slot allocation for pads (slots 16-31)
     // pad_slot_map[i] = pad_index using slot (16+i), or -1 if free
     int pad_slot_map[16];  // 16 dynamic pad slots
@@ -45,6 +54,10 @@ struct MednessPerformance {
     // Requested slots for pads (from RSX file)
     // pad_requested_slot[pad_idx] = 0-15 for explicit slot, -1 for dynamic
     int pad_requested_slot[RSX_MAX_NOTE_PADS];
+
+    // Mute/Solo state for sequences
+    bool sequence_muted[RSX_MAX_SEQUENCES];  // true = muted
+    int solo_slot;                            // Which slot is SOLO'd (-1 = none, 0-15 = slot number)
 
     float tempo_bpm;
 };
@@ -93,6 +106,7 @@ MednessPerformance* medness_performance_create(void) {
 
     mgr->start_mode = SEQUENCE_START_QUANTIZED;  // Default: queued=1 (bar-quantized)
     mgr->tempo_bpm = 120.0f;
+    mgr->solo_slot = -1;  // No SOLO active
 
     // Initialize pad slot map (all slots free)
     for (int i = 0; i < 16; i++) {
@@ -184,13 +198,15 @@ int medness_performance_load_from_rsx(MednessPerformance* manager,
         medness_sequence_set_tempo(seq, manager->tempo_bpm);
         medness_sequence_set_loop(seq, seq_def->loop);
 
-        // Store sequence's program number
+        // Store sequence's program number and setup context
         manager->sequence_programs[i] = seq_def->program_number;
+        manager->sequence_contexts[i].seq_index = i;
+        manager->sequence_contexts[i].program = seq_def->program_number;
 
         // Set callbacks (if already set)
-        // Pass pointer to this sequence's program number as userdata
+        // Pass context (sequence index + program) as userdata
         if (manager->midi_callback) {
-            medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[i]);
+            medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_contexts[i]);
         }
         if (manager->phrase_callback) {
             medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
@@ -282,7 +298,7 @@ int medness_performance_reload_sequence(MednessPerformance* manager,
 
     // Set callbacks
     if (manager->midi_callback) {
-        medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_programs[seq_index]);
+        medness_sequence_set_callback(seq, manager->midi_callback, &manager->sequence_contexts[seq_index]);
     }
     if (manager->phrase_callback) {
         medness_sequence_set_phrase_change_callback(seq, manager->phrase_callback, manager->phrase_userdata);
@@ -498,11 +514,11 @@ void medness_performance_set_midi_callback(MednessPerformance* manager,
     manager->midi_userdata = userdata;
 
     // Update all sequence players with the callback
-    // BUT keep their individual program-specific userdata (stored in sequence_programs[])
+    // BUT keep their individual context (sequence index + program)
     for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
         if (manager->players[i]) {
-            // Use per-sequence program number as userdata, not the manager's global userdata
-            medness_sequence_set_callback(manager->players[i], callback, &manager->sequence_programs[i]);
+            // Use per-sequence context (seq_index + program) as userdata
+            medness_sequence_set_callback(manager->players[i], callback, &manager->sequence_contexts[i]);
         }
     }
 }
@@ -681,4 +697,69 @@ void medness_performance_unload_pad(MednessPerformance* manager, int pad_index) 
         medness_sequence_destroy(manager->pad_players[pad_index]);
         manager->pad_players[pad_index] = nullptr;
     }
+}
+
+// Set mute state for a sequence
+void medness_performance_set_mute(MednessPerformance* manager, int seq_index, int muted) {
+    if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return;
+
+    // If UNMUTING a slot while SOLO is active, CANCEL SOLO mode
+    if (!muted && manager->solo_slot >= 0) {
+        std::cout << "[PERFORMANCE] UNMUTE slot " << seq_index
+                  << " while SOLO active - CANCELLING SOLO mode" << std::endl;
+        manager->solo_slot = -1;  // Cancel SOLO
+        // UNMUTE ALL slots
+        for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
+            manager->sequence_muted[i] = false;
+        }
+        return;
+    }
+
+    manager->sequence_muted[seq_index] = (muted != 0);
+
+    std::cout << "[PERFORMANCE] Slot " << seq_index << " "
+              << (muted ? "MUTED" : "UNMUTED") << std::endl;
+}
+
+// Set solo state for a sequence
+void medness_performance_set_solo(MednessPerformance* manager, int seq_index, int soloed) {
+    if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return;
+
+    if (soloed) {
+        // SOLO this slot: MUTE all other slots
+        std::cout << "[PERFORMANCE] SOLO slot " << seq_index
+                  << " - MUTING all other slots" << std::endl;
+
+        manager->solo_slot = seq_index;
+
+        // MUTE all slots except the SOLO'd one
+        for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
+            manager->sequence_muted[i] = (i != seq_index);
+        }
+    } else {
+        // UN-SOLO: only process if this slot is currently SOLO'd
+        if (manager->solo_slot == seq_index) {
+            std::cout << "[PERFORMANCE] UN-SOLO slot " << seq_index
+                      << " - UNMUTING all slots" << std::endl;
+
+            manager->solo_slot = -1;  // Cancel SOLO
+
+            // UNMUTE ALL slots
+            for (int i = 0; i < RSX_MAX_SEQUENCES; i++) {
+                manager->sequence_muted[i] = false;
+            }
+        } else {
+            std::cout << "[PERFORMANCE] Slot " << seq_index
+                      << " is not SOLO'd (current SOLO: " << manager->solo_slot << ")" << std::endl;
+        }
+    }
+}
+
+// Check if a sequence should be audible
+int medness_performance_is_audible(MednessPerformance* manager, int seq_index) {
+    if (!manager || seq_index < 0 || seq_index >= RSX_MAX_SEQUENCES) return 0;
+
+    // Simple: just check mute state
+    // SOLO logic is already handled by set_solo() which sets mute states
+    return manager->sequence_muted[seq_index] ? 0 : 1;
 }
