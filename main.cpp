@@ -1836,7 +1836,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             sysex_buffer[offset++] = master_flags;
 
             // Byte 3: Master panning (0-127, where 0=left, 64=center, 127=right)
-            sysex_buffer[offset++] = (uint8_t)((mixer.master_pan + 1.0f) * 63.5f);
+            sysex_buffer[offset++] = (uint8_t)(mixer.master_pan * 127.0f);
 
             // === Program state (72 bytes) ===
             // Bytes 4: Number of programs (32)
@@ -1861,7 +1861,7 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
 
             // Bytes 41-72: Program panning (32 bytes)
             for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
-                sysex_buffer[offset++] = (uint8_t)((mixer.program_pans[i] + 1.0f) * 63.5f);
+                sysex_buffer[offset++] = (uint8_t)(mixer.program_pans[i] * 127.0f);
             }
 
             // Bytes 73-75: Reserved
