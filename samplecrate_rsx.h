@@ -110,7 +110,7 @@ typedef struct {
     int program;                        // Program index (0-3 for prog 1-4, -1=current program)
     char midi_file[RSX_MAX_PATH];       // MIDI file path (empty = single note mode, non-empty = play MIDI file)
     int sequence_index;                 // Sequence index to trigger (-1 = none, 0+ = sequence number)
-    int slot;                           // Explicit sequencer slot (0-15 for P1-P16, -1=dynamic allocation)
+    int slot;                           // Explicit sequencer slot (0-15 for T1-T16 in UI, -1=dynamic allocation)
 
     // Action system (new - takes precedence over legacy fields)
     int action;                         // InputAction enum value (ACTION_NONE = use legacy behavior)

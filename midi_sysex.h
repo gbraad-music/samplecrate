@@ -66,6 +66,8 @@ typedef enum {
     // State query commands (0x60-0x6F)
     SYSEX_CMD_GET_SEQUENCE_STATE               = 0x62,  // Request complete sequence state (all slots)
     SYSEX_CMD_SEQUENCE_STATE_RESPONSE          = 0x63,  // Complete sequence state response
+    SYSEX_CMD_GET_PROGRAM_STATE                = 0x64,  // Request program state (master + programs, Samplecrate specific)
+    SYSEX_CMD_PROGRAM_STATE_RESPONSE           = 0x65,  // Program state response
 } SysExCommand;
 
 // Effect IDs for FX_EFFECT_GET/SET commands

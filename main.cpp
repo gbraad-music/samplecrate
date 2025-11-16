@@ -834,6 +834,66 @@ static uint64_t get_microseconds() {
     ).count();
 }
 
+// Helper: build sequence slot state (mute bits, flags, program assignments)
+// Used by both GET_PLAYER_STATE and GET_SEQUENCE_STATE
+// Returns number of bytes written
+static int build_sequence_slot_state(uint8_t* buffer,
+                                       MednessPerformance* sequence_manager,
+                                       SamplecrateRSX* rsx_ptr,
+                                       int include_mute_bits) {
+    int offset = 0;
+
+    // Sequence slot mute bits (2 bytes for 16 slots, bit-packed)
+    if (include_mute_bits) {
+        for (int byte_idx = 0; byte_idx < 2; byte_idx++) {
+            uint8_t mute_byte = 0;
+            for (int bit = 0; bit < 8; bit++) {
+                int slot = byte_idx * 8 + bit;
+                int seq_idx = sequence_rsx_find_slot(rsx_ptr, slot);
+                if (seq_idx >= 0 && !medness_performance_is_audible(sequence_manager, seq_idx)) {
+                    mute_byte |= (1 << bit);
+                }
+            }
+            buffer[offset++] = mute_byte;
+        }
+    }
+
+    // Sequence slot flags (16 bytes, one per slot)
+    for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+        int seq_idx = sequence_rsx_find_slot(rsx_ptr, slot);
+        uint8_t flags = 0;
+
+        if (seq_idx >= 0) {
+            MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
+            if (seq) {
+                flags |= 0x01;  // bit 0: Loaded
+
+                if (medness_performance_is_playing(sequence_manager, seq_idx)) {
+                    flags |= 0x02;  // bit 1: Playing
+                }
+
+                if (medness_sequence_get_loop(seq)) {
+                    flags |= 0x10;  // bit 4: Looping
+                }
+            }
+        }
+
+        buffer[offset++] = flags;
+    }
+
+    // Sequence program assignments (16 bytes)
+    for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
+        int seq_idx = sequence_rsx_find_slot(rsx_ptr, slot);
+        if (seq_idx >= 0 && seq_idx < RSX_MAX_SEQUENCES) {
+            buffer[offset++] = rsx_ptr->sequences[seq_idx].program_number;
+        } else {
+            buffer[offset++] = 0x7F;  // Not loaded
+        }
+    }
+
+    return offset;
+}
+
 // SysEx callback for remote control
 void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data, size_t data_len, void *userdata) {
     // Process SysEx commands (minimal logging)
@@ -1749,6 +1809,76 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             break;
         }
 
+        case SYSEX_CMD_GET_PROGRAM_STATE: {
+            // F0 7D <dev> 64 F7
+            // Request program state (mixer: master + programs, Samplecrate specific)
+            printf("[SysEx] GET_PROGRAM_STATE: Building state response\n");
+
+            // Build state response: F0 7D <dev> 65 <76 data bytes> F7
+            uint8_t sysex_buffer[256];
+            int offset = 0;
+
+            // SysEx header
+            sysex_buffer[offset++] = 0xF0;
+            sysex_buffer[offset++] = 0x7D;  // Manufacturer ID
+            sysex_buffer[offset++] = sysex_get_device_id();
+            sysex_buffer[offset++] = SYSEX_CMD_PROGRAM_STATE_RESPONSE;
+
+            // === Header (4 bytes) ===
+            // Byte 0: Version (0x20 for Samplecrate format)
+            sysex_buffer[offset++] = 0x20;
+
+            // Byte 1: Master volume (0-127)
+            sysex_buffer[offset++] = (uint8_t)(mixer.master_volume * 127.0f);
+
+            // Byte 2: Master flags (bit 0 = master mute)
+            uint8_t master_flags = mixer.master_mute ? 0x01 : 0x00;
+            sysex_buffer[offset++] = master_flags;
+
+            // Byte 3: Master panning (0-127, where 0=left, 64=center, 127=right)
+            sysex_buffer[offset++] = (uint8_t)((mixer.master_pan + 1.0f) * 63.5f);
+
+            // === Program state (72 bytes) ===
+            // Bytes 4: Number of programs (32)
+            sysex_buffer[offset++] = RSX_MAX_NOTE_PADS;
+
+            // Bytes 5-8: Program mute bits (4 bytes for 32 programs, bit-packed)
+            for (int byte_idx = 0; byte_idx < 4; byte_idx++) {
+                uint8_t mute_byte = 0;
+                for (int bit = 0; bit < 8; bit++) {
+                    int prog_idx = byte_idx * 8 + bit;
+                    if (mixer.program_mutes[prog_idx]) {
+                        mute_byte |= (1 << bit);
+                    }
+                }
+                sysex_buffer[offset++] = mute_byte;
+            }
+
+            // Bytes 9-40: Program volumes (32 bytes)
+            for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+                sysex_buffer[offset++] = (uint8_t)(mixer.program_volumes[i] * 127.0f);
+            }
+
+            // Bytes 41-72: Program panning (32 bytes)
+            for (int i = 0; i < RSX_MAX_NOTE_PADS; i++) {
+                sysex_buffer[offset++] = (uint8_t)((mixer.program_pans[i] + 1.0f) * 63.5f);
+            }
+
+            // Bytes 73-75: Reserved
+            sysex_buffer[offset++] = 0x00;
+            sysex_buffer[offset++] = 0x00;
+            sysex_buffer[offset++] = 0x00;
+
+            // SysEx end
+            sysex_buffer[offset++] = 0xF7;
+
+            printf("[SysEx] Sending PROGRAM_STATE_RESPONSE: %d bytes (expected 81 = 5 header + 76 data)\n", offset);
+
+            // Send response
+            midi_output_send_sysex(sysex_buffer, offset);
+            break;
+        }
+
         case SYSEX_CMD_GET_SEQUENCE_STATE: {
             // F0 7D <dev> 62 F7
             // Request complete sequence state (all slots)
@@ -1783,67 +1913,8 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             // Byte 3: Reserved
             sysex_buffer[offset++] = 0x00;
 
-            // Bytes 4-5: Sequence slot mute bits (2 bytes, bit-packed)
-            // SOLO is inferred: if only one bit is 0, that slot is solo'd
-            // IMPORTANT: Indexed by SLOT number, not RSX sequence index
-            uint8_t mute_byte_0 = 0;  // Slots 0-7
-            uint8_t mute_byte_1 = 0;  // Slots 8-15
-
-            for (int slot = 0; slot < 8; slot++) {
-                int seq_idx = sequence_rsx_find_slot(rsx, slot);
-                if (seq_idx >= 0 && !medness_performance_is_audible(sequence_manager, seq_idx)) {
-                    mute_byte_0 |= (1 << slot);
-                }
-            }
-            for (int slot = 8; slot < RSX_MAX_SEQUENCES; slot++) {
-                int seq_idx = sequence_rsx_find_slot(rsx, slot);
-                if (seq_idx >= 0 && !medness_performance_is_audible(sequence_manager, seq_idx)) {
-                    mute_byte_1 |= (1 << (slot - 8));
-                }
-            }
-
-            sysex_buffer[offset++] = mute_byte_0;
-            sysex_buffer[offset++] = mute_byte_1;
-
-            // Bytes 6-21: Slot flags (16 bytes)
-            // IMPORTANT: Iterate by SLOT number, not RSX sequence index
-            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
-                uint8_t flags = 0;
-
-                // Find which RSX sequence (if any) is in this slot
-                int seq_idx = sequence_rsx_find_slot(rsx, slot);
-                if (seq_idx >= 0) {
-                    MednessSequence* seq = medness_performance_get_player(sequence_manager, seq_idx);
-                    if (seq) {
-                        flags |= 0x01;  // bit 0: Loaded
-
-                        if (medness_performance_is_playing(sequence_manager, seq_idx)) {
-                            flags |= 0x02;  // bit 1: Playing
-                        }
-
-                        // bit 2-3: Reserved
-
-                        if (medness_sequence_get_loop(seq)) {
-                            flags |= 0x10;  // bit 4: Looping
-                        }
-
-                        // bit 5-7: Reserved
-                    }
-                }
-
-                sysex_buffer[offset++] = flags;
-            }
-
-            // Bytes 22-37: Program numbers (16 bytes)
-            // IMPORTANT: Iterate by SLOT number
-            for (int slot = 0; slot < RSX_MAX_SEQUENCES; slot++) {
-                int seq_idx = sequence_rsx_find_slot(rsx, slot);
-                if (seq_idx >= 0) {
-                    sysex_buffer[offset++] = rsx->sequences[seq_idx].program_number & 0x7F;
-                } else {
-                    sysex_buffer[offset++] = 0x7F;  // Not loaded
-                }
-            }
+            // Bytes 4-37: Mute bits (2), slot flags (16), program assignments (16)
+            offset += build_sequence_slot_state(&sysex_buffer[offset], sequence_manager, rsx, true);
 
             // Bytes 38-53: Current phrase index (16 bytes)
             // IMPORTANT: Iterate by SLOT number
@@ -6047,12 +6118,12 @@ int main(int argc, char* argv[]) {
                                 int slot = seq ? medness_sequence_get_slot(seq) : -1;
 
                                 if (slot >= 16 && slot <= 31) {
-                                    // Show as P1-P16 with description
+                                    // Show as T1-T16 with description (Triggered pad slots)
                                     const char* desc = rsx->pads[pp.pad_idx].description;
                                     if (desc[0] != '\0') {
-                                        ImGui::Text("P%d: %s", slot - 15, desc);
+                                        ImGui::Text("T%d: %s", slot - 15, desc);
                                     } else {
-                                        ImGui::Text("P%d", slot - 15);
+                                        ImGui::Text("T%d", slot - 15);
                                     }
                                 } else {
                                     // Fallback if slot not assigned (shouldn't happen)
@@ -6243,14 +6314,14 @@ int main(int argc, char* argv[]) {
                             ImGui::Text("Sequence %d: %s", i + 1, seq_def->name);
                             ImGui::SameLine(250.0f);
 
-                            // Program assignment
+                            // Program assignment (P1-P32)
                             ImGui::SameLine(250.0f);
                             ImGui::SetNextItemWidth(80.0f);
-                            int prog_display = seq_def->program_number + 1;  // Display as 1-4
+                            int prog_display = seq_def->program_number + 1;  // Display as 1-32 (P1-P32)
                             if (ImGui::InputInt("##prog", &prog_display)) {
                                 if (prog_display < 1) prog_display = 1;
-                                if (prog_display > 4) prog_display = 4;
-                                seq_def->program_number = prog_display - 1;
+                                if (prog_display > 32) prog_display = 32;
+                                seq_def->program_number = prog_display - 1;  // Store as 0-31
                                 // Auto-save when program assignment changes
                                 if (!rsx_file_path.empty()) {
                                     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
