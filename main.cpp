@@ -1812,7 +1812,6 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
         case SYSEX_CMD_GET_PROGRAM_STATE: {
             // F0 7D <dev> 64 F7
             // Request program state (mixer: master + programs, Samplecrate specific)
-            printf("[SysEx] GET_PROGRAM_STATE: Building state response\n");
 
             // Build state response: F0 7D <dev> 65 <76 data bytes> F7
             uint8_t sysex_buffer[256];
@@ -1872,8 +1871,6 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             // SysEx end
             sysex_buffer[offset++] = 0xF7;
 
-            printf("[SysEx] Sending PROGRAM_STATE_RESPONSE: %d bytes (expected 81 = 5 header + 76 data)\n", offset);
-
             // Send response
             midi_output_send_sysex(sysex_buffer, offset);
             break;
@@ -1882,7 +1879,6 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
         case SYSEX_CMD_GET_SEQUENCE_STATE: {
             // F0 7D <dev> 62 F7
             // Request complete sequence state (all slots)
-            printf("[SysEx] GET_SEQUENCE_STATE: Building state response\n");
 
             if (!sequence_manager || !rsx) {
                 printf("[SysEx] GET_SEQUENCE_STATE: sequence_manager or RSX not initialized\n");
@@ -1953,7 +1949,6 @@ void sysex_callback(uint8_t device_id, SysExCommand command, const uint8_t *data
             sysex_buffer[offset++] = SYSEX_END;
 
             midi_output_send_sysex(sysex_buffer, offset);
-            printf("[SysEx] Sent SEQUENCE_STATE_RESPONSE (%d bytes)\n", offset);
             break;
         }
 
