@@ -474,6 +474,15 @@ int find_pad_for_note(int midi_note) {
     return -1;  // No pad found for this note
 }
 
+// Forward declaration
+void switch_program(int program_index);
+
+// Callback for sequence manager to switch programs
+void sequence_program_switch_callback(int program_index, void* userdata) {
+    (void)userdata;  // Unused
+    switch_program(program_index);
+}
+
 // Switch to a different program (change active synth pointer)
 void switch_program(int program_index) {
     if (!rsx || program_index < 0 || program_index >= rsx->num_programs) return;
@@ -3062,6 +3071,7 @@ int main(int argc, char* argv[]) {
         medness_performance_set_sequencer(sequence_manager, sequencer);
 
         medness_performance_set_midi_callback(sequence_manager, midi_file_event_callback, nullptr);
+        medness_performance_set_program_switch_callback(sequence_manager, sequence_program_switch_callback, nullptr);
         medness_performance_set_tempo(sequence_manager, 125.0f);  // Default BPM
         medness_performance_set_start_mode(sequence_manager, SEQUENCE_START_QUANTIZED);  // Wait for row 0
 
@@ -3888,8 +3898,9 @@ int main(int argc, char* argv[]) {
                             snprintf(file_label, sizeof(file_label), "##prog%d_file", i);
                             ImGui::PushItemWidth(300);
 
-                            if (ImGui::InputText(file_label, rsx->program_files[i], sizeof(rsx->program_files[i]))) {
-                                // Autosave on change
+                            ImGui::InputText(file_label, rsx->program_files[i], sizeof(rsx->program_files[i]));
+                            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                // Autosave on change (only after Enter or loss of focus)
                                 if (!rsx_file_path.empty()) {
                                     samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                 }
@@ -4659,7 +4670,8 @@ int main(int argc, char* argv[]) {
                                 ImGui::Text("SFZ File:");
                                 ImGui::SameLine(120);
                                 ImGui::PushItemWidth(400);
-                                if (ImGui::InputText("##prog_sfz_file", rsx->program_files[prog_idx], sizeof(rsx->program_files[prog_idx]))) {
+                                ImGui::InputText("##prog_sfz_file", rsx->program_files[prog_idx], sizeof(rsx->program_files[prog_idx]));
+                                if (ImGui::IsItemDeactivatedAfterEdit()) {
                                     if (!rsx_file_path.empty()) {
                                         samplecrate_rsx_save(rsx, rsx_file_path.c_str());
                                     }

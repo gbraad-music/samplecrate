@@ -40,6 +40,8 @@ struct MednessPerformance {
     void* midi_userdata;
     MednessSequencePhraseChangeCallback phrase_callback;
     void* phrase_userdata;
+    MednessProgramSwitchCallback program_switch_callback;
+    void* program_switch_userdata;
 
     // Per-sequence program numbers (for routing MIDI to correct synth)
     int sequence_programs[RSX_MAX_SEQUENCES];
@@ -376,6 +378,14 @@ void medness_performance_play(MednessPerformance* manager, int seq_index, int cu
 
     // For sequences: use fixed slot assignment (already set at load time)
     if (manager->start_mode == SEQUENCE_START_IMMEDIATE) {
+        // Activate the program associated with this sequence when starting immediately
+        if (manager->program_switch_callback) {
+            int program = manager->sequence_programs[seq_index];
+            std::cout << "[SEQUENCE MANAGER] Switching to program " << (program + 1)
+                      << " for sequence " << seq_index << std::endl;
+            manager->program_switch_callback(program, manager->program_switch_userdata);
+        }
+
         // Start immediately
         std::cout << "[SEQUENCE MANAGER] Starting sequence " << seq_index << " immediately" << std::endl;
         medness_sequence_play(seq);
@@ -539,6 +549,15 @@ void medness_performance_set_phrase_change_callback(MednessPerformance* manager,
     }
 }
 
+void medness_performance_set_program_switch_callback(MednessPerformance* manager,
+                                                       MednessProgramSwitchCallback callback,
+                                                       void* userdata) {
+    if (!manager) return;
+
+    manager->program_switch_callback = callback;
+    manager->program_switch_userdata = userdata;
+}
+
 void medness_performance_update_samples(MednessPerformance* manager,
                                          int num_samples,
                                          int sample_rate,
@@ -566,6 +585,14 @@ void medness_performance_update_samples(MednessPerformance* manager,
             if (should_start) {
                 std::cout << "[SEQUENCE MANAGER] Starting queued sequence " << q->seq_index
                           << " at pulse " << current_pulse << std::endl;
+
+                // Activate the program associated with this sequence
+                if (manager->program_switch_callback) {
+                    int program = manager->sequence_programs[q->seq_index];
+                    std::cout << "[SEQUENCE MANAGER] Switching to program " << (program + 1)
+                              << " for sequence " << q->seq_index << std::endl;
+                    manager->program_switch_callback(program, manager->program_switch_userdata);
+                }
 
                 MednessSequence* seq = manager->players[q->seq_index];
                 if (seq) {

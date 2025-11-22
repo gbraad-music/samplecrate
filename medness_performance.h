@@ -87,6 +87,16 @@ void medness_performance_set_phrase_change_callback(MednessPerformance* manager,
                                                       MednessSequencePhraseChangeCallback callback,
                                                       void* userdata);
 
+// Program switch callback type
+// Called when a sequence starts playing to activate its associated program
+typedef void (*MednessProgramSwitchCallback)(int program_index, void* userdata);
+
+// Set program switch callback
+// This callback is invoked when a sequence starts playing to switch to its associated program
+void medness_performance_set_program_switch_callback(MednessPerformance* manager,
+                                                       MednessProgramSwitchCallback callback,
+                                                       void* userdata);
+
 // Update all sequences (call from audio callback)
 void medness_performance_update_samples(MednessPerformance* manager,
                                          int num_samples,
